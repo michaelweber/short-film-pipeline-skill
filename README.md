@@ -41,5 +41,6 @@ in your project.
 - Title fonts (Impact, Bahnschrift, Segoe UI Bold, Arial Bold) are looked up by filename; they ship with Windows.
 
 ## Notes
-- Only clone a real person's likeness or voice with their consent.
+- You're responsible for the rights to any real person's or character's likeness or voice you clone (consent,
+  parody/fair use, local law). Check before publishing or monetising.
 - Check the licences of the models you use; the YuE2 instrumental LoRAs, for example, are non-commercial.

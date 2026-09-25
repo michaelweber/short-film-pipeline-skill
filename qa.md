@@ -10,10 +10,13 @@
 | Voice identity | `$PY_TORCH tools/voice_similarity.py voices/<v>.wav renders/<id>.vocals.flac narration/*.wav` | ≥ 0.85 (short lines score lower; compare against the clip's own half-vs-half score) | re-roll that clip/shot `seed` |
 | Re-rolled takes | `speech_qa.transcribe(Path(clip), None)` | exact words | re-roll again |
 | Clipped endings | last 60 ms of each narration piece vs its median speech level | ≤ −10 dB (near 0 dB = cut mid-word) | cut the piece later; re-render the take longer if the take itself ends on the word |
+| Voice reference | spectrogram of `voices/<v>.wav` (`ffmpeg -i … -lavfi showspectrumpic=s=1200x300:scale=log:fscale=log -frames:v 1 spec.png`) | pauses are plain room tone, no sustained tonal bands (music/singing) | pick a dry speech source; the clone copies any music bed into every line |
+| Narration bed | spectrogram of each narration clip | nothing tonal between words | fix the reference first; `"narration_isolate": true` only lowers it |
 | Stills | `python tools/sheet.py film/<f>/shots.json --stills --tag stills` | one of each character, right scale, no garbled text, no stray cameras | seed sweep (+1..+3); remove equipment words from the style |
 | Action shots | `python tools/sheet.py film/<f>/shots.json --ids <ids> --cols 5 --tag action` (≈1 fps tile) | action reads left to right, no reversed physics | restage the still, fixed camera |
 | Silent mouths | `python tools/sheet.py film/<f>/shots.json --ids <id> --cols 16 --crop <box around the silent face>` | the non-speaking character's mouth never opens (check the cut, with holds applied) | `tools/mouth_hold.py` → `"hold"` on the shot (see prompting.md) |
-| Invented words | `speech_qa.py` heard text | nothing after the scripted line | trim with `"out"` about 0.8 s after the line (`narrate.split_take` on the vocal stem finds it) |
+| Invented words | `speech_qa.py` heard text; then ASR each `narrate.dialogue_spans()` span of the vocal stem up to the cut end | nothing after the scripted line inside the cut | `"out"` ~0.4 s after the line's last word and before the next speech span; a fixed "+0.8 s" can let the start of the babble through |
+| Silent shots | `sheet.py --ids <id> --cols 12 --crop <box around the face>` | mouth stays shut (don't trust ASR here: it transcribes the music) | music-only `audio` + closed-mouth subject (prompting.md); re-roll `seed` |
 | Hands | `python tools/sheet.py film/<f>/shots.json --cols 5 --tag hands` | five fingers on every visible hand, no floating hands | re-roll `seed`; restage the keyframe with hands resting, holding a prop, or out of frame |
 | Cache | `python tools/h3_render.py film/<f>/shots.json --dry-run` | 0 stale (every line `= … up to date`) | render the stale shots |
 | Titles | frame grab at every title's `at + 1 s` in the cut (`ffmpeg -ss <t> -i <f>.mp4 -frames:v 1 …`) | no badge or lower third over a face; the right text | `"align": "left"` on the rank badge |

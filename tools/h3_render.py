@@ -35,6 +35,11 @@ Modes:
         templates. At most 9 reference images per shot.
   clip — copy an existing video ("source", relative to the shot list) into renders/<id>.mp4, scaled/padded to
         the film size at 24 fps (no GPU work, no "duration"; keeps the source's audio).
+  still — render a still image ("source", relative to the shot list) as renders/<id>.mp4 of "duration" seconds,
+        cover-fitted to the film size at 24 fps with a silent audio track (no GPU work, no "prompt"). Static,
+        or a Ken Burns move with "kenburns": {"from": [cx, cy, zoom], "to": [cx, cy, zoom]} — the centre of the
+        visible window as fractions of the cover-fitted frame (0-1) and zoom >= 1, interpolated linearly over the
+        shot (Resolve 21.1's API has no keyframe calls, so the move is rendered here, supersampled 2x).
 Renders land in <shotlist dir>/renders/<id>.mp4 with a <id>.json sidecar; a shot re-renders only when its
 effective spec (prompt, frames' content hashes, params) changes.
 """
@@ -253,6 +258,34 @@ def last_frame(video: Path) -> Path:
     return png
 
 
+def kenburns_frames(src: Path, w: int, h: int, kb: dict, n: int, sid: str):
+    """Yields `n` rgb24 frames (w x h) of `src` cover-fitted to the frame, panning/zooming linearly from kb["from"]
+    to kb["to"] ([cx, cy, zoom]; see the module docstring). Centres are clamped so the window stays inside the
+    picture. Rendered at 2x and reduced, so slow sub-pixel moves stay smooth."""
+    from PIL import Image
+
+    def clamp(cx: float, cy: float, z: float) -> tuple[float, float, float]:
+        z = max(1.0, z)
+        m = 0.5 / z
+        return min(max(cx, m), 1 - m), min(max(cy, m), 1 - m), z
+
+    ends = [[float(v) for v in kb[k]] for k in ("from", "to")]
+    fixed = [list(clamp(*e)) for e in ends]
+    if fixed != ends:
+        print(f"{sid}: kenburns centre clamped")
+    img = Image.open(src).convert("RGB")
+    big_w, big_h = 2 * w, 2 * h
+    s = max(big_w / img.width, big_h / img.height)
+    img = img.resize((max(big_w, round(img.width * s)), max(big_h, round(img.height * s))), Image.Resampling.LANCZOS)
+    x0, y0 = (img.width - big_w) // 2, (img.height - big_h) // 2
+    img = img.crop((x0, y0, x0 + big_w, y0 + big_h))
+    (ax, ay, az), (bx, by, bz) = fixed
+    for t in range(n):
+        f = t / (n - 1) if n > 1 else 0.0
+        cx, cy, z = clamp(ax + (bx - ax) * f, ay + (by - ay) * f, az + (bz - az) * f)
+        box = ((cx - 0.5 / z) * big_w, (cy - 0.5 / z) * big_h, (cx + 0.5 / z) * big_w, (cy + 0.5 / z) * big_h)
+        yield img.transform((big_w, big_h), Image.Transform.EXTENT, box, Image.Resampling.BICUBIC).reduce(2).tobytes()
+
 
 def wait_for(prompt_id: str, label: str) -> dict:
     t0 = time.time()
@@ -323,6 +356,47 @@ def render(shotlist: Path, only: set[str] | None, force: bool, dry_run: bool, re
             sidecar.write_text(json.dumps({"digest": digest, "source": shot["source"]}, indent=2), encoding="utf-8")
             print(f"+ {sid}: clip {shot['source']}")
             continue
+        if shot.get("mode") == "still":
+            src = root / shot["source"]
+            if not src.exists():
+                raise SystemExit(f"{sid}: missing source {src}")
+            settings = render_settings(shot, film)
+            w, h = settings["width"], settings["height"]
+            digest = hashlib.sha1(json.dumps({"mode": "still", "source": hashlib.sha1(src.read_bytes()).hexdigest(),
+                                              "w": w, "h": h, "duration": shot["duration"],
+                                              "kenburns": shot.get("kenburns")}, sort_keys=True).encode()).hexdigest()
+            sidecar = dest.with_suffix(".json")
+            if not force and dest.exists() and sidecar.exists() and json.loads(sidecar.read_text())["digest"] == digest:
+                print(f"= {sid}: up to date")
+                continue
+            if restamp and dest.exists() and sidecar.exists():
+                meta = json.loads(sidecar.read_text())
+                sidecar.write_text(json.dumps(meta | {"digest": digest}, indent=2), encoding="utf-8")
+                print(f"# {sid}: restamped existing render as current")
+                continue
+            if dry_run:
+                print(f"~ {sid}: still (dry run)")
+                continue
+            enc = ["-c:v", "libx264", "-crf", "16", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", str(dest)]
+            if "kenburns" in shot:
+                n = round(shot["duration"] * FPS)
+                proc = subprocess.Popen(["ffmpeg", "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgb24",
+                                         "-s", f"{w}x{h}", "-r", str(FPS), "-i", "-", "-f", "lavfi", "-i",
+                                         "anullsrc=r=48000:cl=stereo", "-t", str(shot["duration"]), *enc],
+                                        stdin=subprocess.PIPE)
+                for frame in kenburns_frames(src, w, h, shot["kenburns"], n, sid):
+                    proc.stdin.write(frame)
+                proc.stdin.close()
+                if proc.wait():
+                    raise SystemExit(f"{sid}: ffmpeg failed")
+            else:
+                subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-loop", "1", "-i", str(src), "-f", "lavfi",
+                                "-i", "anullsrc=r=48000:cl=stereo", "-t", str(shot["duration"]), "-vf",
+                                f"scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},fps={FPS},setsar=1",
+                                *enc], check=True)
+            sidecar.write_text(json.dumps({"digest": digest, "source": shot["source"]}, indent=2), encoding="utf-8")
+            print(f"+ {sid}: still {shot['source']}")
+            continue
         # resolve image paths (+ "@prev" chaining to the previous shot's last frame)
         for key in ("first_frame", "last_frame"):
             if shot.get(key) == "@prev":
@@ -353,11 +427,11 @@ def render(shotlist: Path, only: set[str] | None, force: bool, dry_run: bool, re
             if not p.exists():
                 raise SystemExit(f"{sid}: missing input {p}")
         # Cache key = everything that changes the rendered pixels/audio. Narration, bed, the edit-only
-        # titles/zoom/hold/out and the literal seed/turbo/steps keys are excluded; their effective
+        # titles/zoom/hold/out/pillarbox and the literal seed/turbo/steps keys are excluded; their effective
         # values are covered by "_seed" and "_render".
         spec = {k: v for k, v in shot.items() if k not in (
             "seed", "turbo", "steps", "width", "height", "narration", "bed", "titles", "zoom", "hold", "out",
-            "first_frame", "last_frame", "guides", "_refs", "_voices")}
+            "pillarbox", "first_frame", "last_frame", "guides", "_refs", "_voices")}
         spec["_images"] = [hashlib.sha1(p.read_bytes()).hexdigest() for p in local]
         spec["_guides"] = [g["t"] for g in shot.get("guides", [])]
         spec["_render"] = render_settings(shot, film)

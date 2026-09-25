@@ -56,6 +56,11 @@ to its render (`renders/<id>.api.json`); load it into the ComfyUI UI to tweak it
     reference only, so likeness comes from the subjects' photos. At most 9 reference images per shot.
   - `mode: "black"`: black picture with a faint room-tone bed and no GPU work (title cards, narration-only beats).
   - `mode: "clip"`: `"source": "media/intro.mp4"` drops pre-made footage into the cut with its own audio.
+  - `mode: "still"`: `"source": "stills/photo.png"`, `"duration"`: a photograph as a shot, cover-fitted to the film
+    size, with a silent track and no GPU work. `"kenburns": {"from": [cx, cy, zoom], "to": [cx, cy, zoom]}` pans
+    and zooms linearly across the shot: `cx`/`cy` are the centre of the visible window as fractions of the
+    cover-fitted frame, `zoom` ≥ 1, centres clamped so the window stays inside the picture. The move is rendered
+    into the file (2× supersampled), because Resolve 21.1's scripting API has no keyframe calls.
   - `styles` (top level) plus `"style": "<name>"` on a shot replaces the film-wide `style` for that shot.
   - `"loras": [["file.safetensors", strength], ...]` stacks extra LoRAs after the turbo LoRA; `"trigger"` puts
     trigger words at the very start of the prompt. Both are part of the cache key. A/B them per shot.
@@ -76,11 +81,18 @@ to its render (`renders/<id>.api.json`); load it into the ComfyUI UI to tweak it
 - Each shot can carry `"narration": [{"at": 1.5, "text": "...", "seed": 7, "file": "..."}]`. `at` is seconds into
   that shot; a line may run over into the next shot. `seed` re-rolls one take. `file` uses a ready-made clip,
   e.g. a piece cut from a long take with `narrate.split_take(take, [line, line, ...])`, which finds each line at
-  envelope dips, checks it with ASR, and pads 0.15 s before / 0.6 s after.
+  envelope dips, checks it with ASR, and pads 0.15 s before / 0.6 s after. `voice` reads the line in another
+  `voices` entry (a character's letter home in their own voice); `tempo` overrides `narration_tempo`.
+- `"narration_tempo": 1.1` speeds every finished clip up with ffmpeg `atempo` (pitch kept), cached as
+  `<hash>_x1.1.wav`. Cloned narrators tend to read slowly; 1.1–1.2 sounds natural.
+- `"narration_isolate": true` keeps only the voice of every clip (Mel-Band RoFormer vocal stem), cached as
+  `<hash>_iso.wav`. VibeVoice sometimes adds a music bed, especially when the reference clip had one; isolation
+  lowers it, and a dry reference avoids it.
 - `--plan` warns when lines overlap each other or sit on on-screen dialogue (speech spans after a shot's `out`
   are ignored).
 - `"narration_ducking_db"` (-14): how far shot audio dips under the voice.
-- Clips are cached in `narration/<hash>.wav` (hash of text, voice, engine settings and seed).
+- Clips are cached in `narration/<hash>.wav` (hash of text, voice, engine settings and seed); isolation and tempo
+  are derived files beside it, so changing them never re-renders a take.
 
 ## Music
 `"music": {"style", "lyrics", "seed", "max_duration", "gain_db": -6, "duck_db": -9, "start": 0, "in": 0, "file"}`.
@@ -108,6 +120,8 @@ set `RESOLVE_SCRIPT_API` and `RESOLVE_SCRIPT_LIB`.
     location super inside the bottom letterbox bar), `doc` (centred title card: big first line, smaller further
     lines, gold rules above and below).
   - `"zoom": 1.25` punches in on the V1 item.
+  - `"pillarbox": 1.3333` crops the V1 item's sides so only that aspect ratio stays visible (4:3 archival TV); the
+    black timeline background shows through. Keep people in the central 4:3 (say so in `style`).
   - `"hold": {"from", "dur", "crop": {"left": 0.57, "softness": 30}}` lays a short stretch of the shot's own
     render, looped forward and backward and cropped, over the whole shot. It keeps a silent character's mouth
     shut (H3 lip-syncs every mouth in frame). `tools/mouth_hold.py` picks the stretch.

@@ -16,7 +16,14 @@ shots.json additions:
   shot "narration": [{"at": 1.5, "text": "...", "seed": 7}]   # seconds from the start of that shot; may run into
                                                 #  the next. "seed" (optional) overrides "narration_seed" (42) for
                                                 #  one line, e.g. to re-roll a take whose voice drifted; "file"
-                                                #  (optional) uses that clip instead (e.g. "narration/picked/a01.wav")
+                                                #  (optional) uses that clip instead (e.g. "narration/picked/a01.wav");
+                                                #  "voice" (optional) reads the line in another "voices" key (e.g. a
+                                                #  character's letter), default "narration_voice"; "tempo" (optional)
+                                                #  overrides "narration_tempo"
+  "narration_tempo": 1.15                       # speed factor for the finished clips (ffmpeg atempo, pitch kept;
+                                                #  default 1.0); a sped-up clip is cached as <hash>_x<tempo>.wav
+  "narration_isolate": true                     # keep only the voice of each clip (Mel-Band RoFormer vocal stem;
+                                                #  VibeVoice sometimes adds a music bed); cached as <hash>_iso.wav
   shot "bed": "instruments"                     # use the shot's H3 audio with vocals removed (for shots whose
                                                 #  H3 audio had voice-over baked in); "none" drops the shot's audio
                                                 #  from the cut (music and narration only); default "full"
@@ -92,10 +99,11 @@ def h3_take_seconds(texts: list[str]) -> int:
     return max(5, math.ceil(1 + words / 2.6 + 0.7 * (len(texts) - 1) + 3))
 
 
-def _h3_vo(film: dict, root: Path, texts: list[str], seed: int, prefix: str) -> Graph:
-    """H3 ref-mode take of the narrator reading `texts` in order (see module docstring), saving only its audio."""
-    voice_key = film["narration_voice"]
-    subject = film.get("narration_subject")
+def _h3_vo(film: dict, root: Path, texts: list[str], seed: int, prefix: str, voice_key: str | None = None) -> Graph:
+    """H3 ref-mode take of the narrator reading `texts` in order (see module docstring), saving only its audio.
+    `voice_key` reads them in another voice; the narration_subject stages only the narration voice."""
+    voice_key = voice_key or film["narration_voice"]
+    subject = film.get("narration_subject") if voice_key == film["narration_voice"] else None
     who = film["voices"][voice_key]["desc"]
     what = "one line" if len(texts) == 1 else "these lines in order, with a short pause between them,"
     audio = H3_VO_AUDIO.format(who=who, what=what, lines=" ".join(f'"{t}"' for t in texts))
@@ -135,19 +143,28 @@ def duration(path: Path) -> float:
     return float(out) if out not in ("", "N/A") else 0.0
 
 
-def clip_path(film: dict, root: Path, text: str, seed: int | None = None, file: str | None = None) -> Path:
-    """Where the line's clip lives: the line's own "file" if set, else the engine's cache path."""
+def clip_path(film: dict, root: Path, text: str, seed: int | None = None, file: str | None = None,
+              voice: str | None = None, tempo: float = 1.0, raw: bool = False) -> Path:
+    """Where the line's clip lives: the line's own "file" if set, else the engine's cache path. The engine's clip is
+    <hash>.wav (`raw`); "narration_isolate" derives <hash>_iso.wav from it, a tempo other than 1 <...>_x<tempo>.wav."""
     if file:
         return root / file
-    voice = film["voices"][film["narration_voice"]]
-    ref = root / voice["audio"]
+    voice_key = voice or film["narration_voice"]
+    ref = root / film["voices"][voice_key]["audio"]
     seed = film.get("narration_seed", 42) if seed is None else seed
     engine = film.get("narration_engine", "vibevoice")
     extra = [H3_VO_SCENE, H3_VO_AUDIO, film.get("narration_subject"), h3_render.render_settings({"mode": "ref"}, film)
              ] if engine == "h3" else []
+    if voice_key != film["narration_voice"]:
+        extra.append(voice_key)  # only for other voices, so the narration voice's cached clips keep their names
     key = hashlib.sha1(json.dumps([text, engine, seed, hashlib.sha1(ref.read_bytes()).hexdigest(), *extra])
                        .encode())
-    return root / "narration" / f"{key.hexdigest()[:16]}.wav"
+    path = root / "narration" / f"{key.hexdigest()[:16]}.wav"
+    if raw:
+        return path
+    if film.get("narration_isolate"):
+        path = path.with_name(f"{path.stem}_iso.wav")
+    return path if tempo == 1.0 else path.with_name(f"{path.stem}_x{tempo:g}.wav")
 
 
 def dialogue_spans(video: Path) -> list[tuple[float, float]]:
@@ -164,16 +181,38 @@ def dialogue_spans(video: Path) -> list[tuple[float, float]]:
     return spans
 
 
-def tts(film: dict, root: Path, text: str, seed: int | None = None, file: str | None = None) -> Path:
-    voice = film["voices"][film["narration_voice"]]
-    engine = film.get("narration_engine", "vibevoice")
-    ref = root / voice["audio"]
-    seed = film.get("narration_seed", 42) if seed is None else seed
-    dest = clip_path(film, root, text, seed, file)
+def tts(film: dict, root: Path, text: str, seed: int | None = None, file: str | None = None,
+        voice: str | None = None, tempo: float = 1.0) -> Path:
+    """The line's finished clip: the engine's take (cached), then its isolated voice ("narration_isolate") and tempo
+    as cached derivatives, so neither re-renders the take."""
     if file:
+        dest = root / file
         if not dest.exists():
             raise SystemExit(f"missing narration file {dest}")
         return dest
+    dest = clip_path(film, root, text, seed, None, voice, tempo)
+    if dest.exists():
+        return dest
+    clip = _engine_clip(film, root, text, seed, voice)
+    if film.get("narration_isolate"):
+        iso = clip.with_name(f"{clip.stem}_iso.wav")
+        if not iso.exists():
+            isolate_voice(clip, iso)
+        clip = iso
+    if tempo != 1.0:
+        # Sped-up copy (pitch kept); the slower clips stay cached beside it.
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(clip), "-af", f"atempo={tempo}", str(dest)],
+                       check=True)
+        clip = dest
+    return clip
+
+
+def _engine_clip(film: dict, root: Path, text: str, seed: int | None, voice_key: str | None) -> Path:
+    voice = film["voices"][voice_key or film["narration_voice"]]
+    engine = film.get("narration_engine", "vibevoice")
+    ref = root / voice["audio"]
+    seed = film.get("narration_seed", 42) if seed is None else seed
+    dest = clip_path(film, root, text, seed, None, voice_key, raw=True)
     if dest.exists():
         return dest
     dest.parent.mkdir(exist_ok=True)
@@ -183,7 +222,7 @@ def tts(film: dict, root: Path, text: str, seed: int | None = None, file: str | 
         # The raw take is kept (<hash>.take.flac), so re-trimming never re-renders it.
         take = dest.with_suffix(".take.flac")
         if not take.exists():
-            fetch_audio(run_graph(_h3_vo(film, root, [text], seed, prefix), f"h3 {text[:30]}"), take)
+            fetch_audio(run_graph(_h3_vo(film, root, [text], seed, prefix, voice_key), f"h3 {text[:30]}"), take)
         cut(take, *split_take(take, [text])[0], flac)
     else:
         g = Graph()
@@ -194,6 +233,21 @@ def tts(film: dict, root: Path, text: str, seed: int | None = None, file: str | 
     flac.unlink()
     print(f"\r+ narration {dest.name}: {duration(dest):.1f}s  {text[:60]}")
     return dest
+
+
+def isolate_voice(src: Path, dest: Path) -> None:
+    """The vocal stem of a narration clip (Mel-Band RoFormer), re-normalised and trimmed like any clip. VibeVoice
+    sometimes invents a music/ambience bed under the voice; this drops it."""
+    g = Graph()
+    a = g.add("LoadAudio", audio=upload_image(src))
+    m = g.add("MelBandRoFormerModelLoader", model_name=SEPARATOR)
+    s = g.add("MelBandRoFormerSampler", model=[m, 0], audio=[a, 0])
+    g.add("SaveAudio", audio=[s, 0], filename_prefix=f"h3film/stems/{src.stem}_voice")
+    flac = dest.with_suffix(".flac")
+    fetch_audio(run_graph(g, f"isolate {src.stem}"), flac)
+    finish_clip(flac, dest)
+    flac.unlink()
+    print(f"\r+ narration {dest.name}: voice isolated")
 
 
 def finish_clip(src: Path, dest: Path) -> None:
@@ -325,7 +379,8 @@ def plan(film: dict, root: Path) -> tuple[list[dict], list[dict]]:
         clips.append({"id": shot["id"], "video": video, "start": t, "end": t + d, "bed": shot.get("bed", "full")})
         for line in shot.get("narration", []):
             events.append({"shot": shot["id"], "start": t + line["at"], "text": line["text"], "seed": line.get("seed"),
-                           "file": line.get("file")})
+                           "file": line.get("file"), "voice": line.get("voice"),
+                           "tempo": float(line.get("tempo", film.get("narration_tempo", 1.0)))})
         t += d
     return clips, events
 
@@ -360,8 +415,8 @@ def main() -> None:
     root = a.shotlist.parent
     clips, events = plan(film, root)
     for e in events:
-        clip = (clip_path(film, root, e["text"], e["seed"], e["file"]) if a.plan
-                else tts(film, root, e["text"], e["seed"], e["file"]))
+        clip = (clip_path(film, root, e["text"], e["seed"], e["file"], e["voice"], e["tempo"]) if a.plan
+                else tts(film, root, e["text"], e["seed"], e["file"], e["voice"], e["tempo"]))
         if clip.exists():
             e["end"] = e["start"] + duration(clip)
     report(film, root, clips, events)

@@ -56,3 +56,25 @@
 - **Hands:** ask for "natural human hands with five fingers each", and stage keyframes with hands resting or
   holding a prop; raised counting hands come out with four fingers. A character "resting one hand on" a large
   prop can leave a disembodied hand on the prop once they move; put their hands out of frame instead.
+- **Shots where nobody speaks (B-roll of a character walking or working): give H3 a music-only soundtrack.** With
+  an ambience line ("footsteps, distant traffic. No speech, no voices.") H3 invented speech and lip-synced it in
+  almost every silent shot; with "The soundtrack is a solo fiddle playing a slow waltz, and nothing else, from the
+  first frame to the last" the mouths stayed shut. Also use a silent subject variant whose only pictures are
+  closed-mouth stills ("in this shot he is silent, his mouth a flat shut seam"), and drop the shot's audio in the
+  cut (`"bed": "none"`). ASR on such a render hallucinates text from the music ("the song is a tribute to…"), so
+  judge the mouth from frames, not from the transcript.
+- **Never use a full scene photo as a subject picture.** H3 plays it back as a scene: six ref shots cut to the
+  scene photo for a second or more. Subjects get character pictures only; a scene photo goes in as `first_frame`
+  (cover-fitted to the film size) when the shot should start from it.
+- **A ref shot can open on one of its subject pictures** (a grey-backdrop portrait for the first second). Pin the
+  opening with `first_frame` = the keyframe still instead of `framing` when that happens.
+- **Well-known characters in a costume:** likeness pictures show the character alone; the costume comes from one
+  photo of the outfit, with "dressed like the soldier in picture 3 … only his outfit comes from picture 3; his face
+  and head are his own". Otherwise the photo's face bleeds in.
+- **Puppet or cartoon heads grow in Klein keyframes.** Add "his head is in proportion to his body, about the size of
+  a grown man's head, on a tall slender adult-sized body, as in the full-body picture", with a full-body picture
+  among the refs.
+- **Headwear on characters with eyes on top of the head** (a headband, a bandana) covers the eyes unless placed:
+  "a thin bandana tied around the back of his head behind his two round eye bulbs, both eyes fully visible".
+- **Transparent reference images** (PNG/WebP with alpha) load as black backgrounds: flatten them onto grey first.
+  `.jfif` files are JPEGs; rename them `.jpg` so ComfyUI's image loader lists them.

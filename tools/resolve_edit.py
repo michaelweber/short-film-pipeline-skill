@@ -32,6 +32,9 @@ Per-shot extras:
             super inside the bottom letterbox bar) and doc (centred title card: big first line, smaller further
             lines, gold rules above and below) in Bahnschrift.
   "zoom": 1.25                                                           # punch-in on the V1 item (ZoomX/ZoomY)
+  "pillarbox": 1.3333                                                    # crop the V1 item's sides to this visible
+                                                                         #  aspect ratio (4:3 archival footage); the
+                                                                         #  black timeline background shows through
   "out": 2.4                                                             # end the shot here (seconds), e.g. to drop
                                                                          #  words H3 invented after a short line
   "hold": {"from": 3.0, "dur": 2.0, "crop": {"left": 0.58, "softness": 30}}
@@ -40,7 +43,8 @@ Per-shot extras:
             # H3 lip-syncs every mouth in frame, so a character who must stay silent keeps moving their lips; hold
             # their side on a stretch where the mouth is shut (tools/mouth_hold.py picks it). Same locked-off
             # camera and light, so the seam doesn't show. Holds inherit the shot's zoom.
-Pre-made footage (a channel intro) comes in as an h3_render.py "clip" shot and is cut like any other shot.
+Pre-made footage (a channel intro) comes in as an h3_render.py "clip" shot and is cut like any other shot; still
+photographs as "still" shots, with any Ken Burns move ("kenburns") rendered into the shot by h3_render.py.
 Ducking is done on the timeline, not baked into files: A1 is split around every narration line, the pieces
 under the voice drop to "narration_ducking_db" (-14), and 0 dB audio cross fades make the ramps. It all stays
 editable in Resolve. Loudness: render and deliver, measure the delivered file with ffmpeg ebur128, shift every
@@ -382,6 +386,8 @@ def build(project, film: dict, root: Path, clips: list[dict], events: list[dict]
                                          "trackIndex": 1, "recordFrame": t0 + frame}])
         if "zoom" in shot:
             set_zoom(vitem, float(shot["zoom"]), c["id"])
+        if "pillarbox" in shot:
+            set_pillarbox(vitem, film, float(shot["pillarbox"]), c["id"])
         if "hold" in shot:
             place_hold(film, root, shot, c["video"], n, t0 + frame, media, tracks["holds"])
         for k, title in enumerate(shot.get("titles", [])):
@@ -438,6 +444,16 @@ def set_zoom(item, z: float, sid: str) -> None:
     item.SetProperty("ZoomY", z)
     if abs(float(item.GetProperty("ZoomX")) - z) > 1e-3:
         raise SystemExit(f"{sid}: zoom not applied")
+
+
+def set_pillarbox(item, film: dict, ratio: float, sid: str) -> None:
+    """Crop both sides of the item so `ratio` (width/height) of the frame stays visible, centred."""
+    w, h = film.get("width", 1344), film.get("height", 768)
+    px = (w - h * ratio) / 2
+    for side in ("Left", "Right"):
+        item.SetProperty(f"Crop{side}", px)
+        if abs(float(item.GetProperty(f"Crop{side}")) - px) > 0.5:
+            raise SystemExit(f"{sid}: pillarbox crop not applied")
 
 
 def hold_clip(root: Path, video: Path, hold: dict, frames: int) -> Path:
@@ -545,7 +561,7 @@ def main() -> None:
     root = a.shotlist.parent
     clips, events = plan(film, root)
     for e in events:
-        e["clip"] = tts(film, root, e["text"], e["seed"], e["file"])
+        e["clip"] = tts(film, root, e["text"], e["seed"], e["file"], e["voice"], e["tempo"])
         e["end"] = e["start"] + duration(e["clip"])
     report(film, root, clips, events)
     resolve = connect()

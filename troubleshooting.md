@@ -5,6 +5,11 @@
 | `MemoryError: VBAR allocation failed` | dynamic VRAM (comfy-aimdo) is on and fragmented | restart ComfyUI with `--disable-dynamic-vram` |
 | ~150 s per step, or a 2 min shot taking over an hour | VRAM spilled into shared memory (several GPU jobs queued; TTS nodes keep models outside ComfyUI's manager, so `/free` doesn't release them) | one GPU job at a time; clear the queue and restart ComfyUI |
 | Narrator timbre flips on one line | a bad TTS take | re-roll that line's `seed` in `narration`, rescore with `voice_similarity.py` |
+| Music or singing under every narration line | the voice reference came from a scored source (trailer, documentary); the TTS clones the bed with the voice | new reference from dry speech (interview, radio); regenerate all lines. `"narration_isolate": true` reduces a bed but doesn't remove it |
+| VibeVoice `out of memory` partway through a narration batch, or H3 OOM right after narration | VibeVoice keeps its models in VRAM outside ComfyUI's manager; `/free` doesn't release them | restart ComfyUI and rerun; the finished lines are cached |
+| A silent character mutters and moves their mouth in B-roll | an ambience-only `audio` line invites H3 to invent speech | music-only `audio`, closed-mouth subject, `"bed": "none"` (prompting.md) |
+| A shot cuts to a reference photo mid-shot | a full scene photo in a subject's `ref` list | character pictures only in subjects; scene photos as `first_frame` |
+| A hand-edited still got overwritten | its prompt, refs or seed changed afterwards, so `keyframes.py` re-rendered it | leave edited stills' specs alone |
 | Last syllable of a line missing ("babies" → "baby") | the cut sits in the envelope dip inside a soft ending, or the take ended on the word | cut later (`split_take` pads 0.15 s / 0.6 s); if the take ends on the word, render it longer |
 | Dialogue sounds cut off | narration placed on top of it, or `out` too tight | `narrate.py --plan`, move the line off the `!!` span; set `out` ~0.8 s after the line |
 | Silent B-roll has distracting ambience | the shot's own audio is on A1 | `"bed": "none"` on every shot without a spoken line |
