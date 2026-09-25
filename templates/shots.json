@@ -1,0 +1,44 @@
+{
+  "title": "My Film",
+  "project_prefix": "myfilm_",
+  "style": "<global look: medium, camera, light, texture; never mention a silent character's mouth>",
+  "styles": {"card": "Clean bold 2D motion graphics."},
+  "width": 1344,
+  "height": 768,
+  "seed": 1000,
+  "turbo": {"fl": "fl4", "ref": "ref8"},
+  "loudness_lufs": -16,
+  "crf": 23,
+  "subjects": {
+    "hero": {"desc": "<Name>, <age, build, hair>; in this film <clothes>", "ref": ["refs/hero_1.png", "refs/hero_2.png", "refs/hero_3.png"]},
+    "sidekick": {"desc": "<Name>, <look>", "ref": ["refs/sidekick_src.png", "stills/sidekick_closed.png"]},
+    "sidekick_silent": {"desc": "<Name>, <look>; in this shot silent, mouth a flat shut seam", "ref": ["stills/sidekick_closed.png"]}
+  },
+  "voices": {
+    "hero": {"desc": "<Name>", "audio": "voices/hero.wav", "ref_text": "<transcript of hero.wav>"},
+    "sidekick": {"desc": "<Name>", "audio": "voices/sidekick.wav", "ref_text": "<transcript of sidekick.wav>"}
+  },
+  "stills": {
+    "sidekick_closed": {"seed": 1111, "refs": ["refs/sidekick_src.png"], "width": 1024, "height": 1024, "prompt": "The same character with its mouth closed, on a plain grey backdrop, front view. Only this one character."},
+    "set": {"seed": 2345, "prompt": "<location, described positively>, seen straight on at eye level from the viewer's seat. Nobody in frame."},
+    "k01": {"seed": 3456, "refs": ["refs/hero_1.png", "@sidekick_closed", "@set"], "prompt": "<Name> at <place>, <framing>, <relative scale>, hands resting on <surface>. <Sidekick> to his right, mouth closed. One of each only."}
+  },
+  "shots": [
+    {"id": "intro", "mode": "clip", "source": "media/intro.mp4"},
+    {"id": "t00", "mode": "fl", "style": "card", "duration": 4,
+     "prompt": "<motion graphic background>", "audio": "a short music sting. No speech.",
+     "titles": [{"text": "MY FILM", "style": "card", "at": 0.2, "dur": 3.6}]},
+    {"id": "s01", "mode": "ref", "duration": 7, "subjects": ["hero", "sidekick_silent"], "voices": ["hero"],
+     "framing": "stills/k01.png",
+     "prompt": "<Set and layout in words: walls, props, who sits where, framing>. <Name> talks straight to camera from the first frame to the last, relaxed hand gestures. His hands are natural human hands with five fingers each. From the first word to the last, only <Name>'s own lips move. <Sidekick> sits completely still and silent the whole shot.",
+     "audio": "Faint room tone throughout. <Name>, the man on the left, in the voice of <Audio 1>, says exactly one line and nothing else: \"<line>\" No other voices. <Sidekick> makes no sound.",
+     "titles": [{"text": "#1", "style": "rank", "at": 1.0, "dur": 3.0}, {"text": "LOWER THIRD", "style": "lower", "at": 1.0, "dur": 4.0}],
+     "zoom": 1.25,
+     "hold": {"from": 3.0, "dur": 2.0, "crop": {"left": 0.57, "softness": 30}}},
+    {"id": "s02", "mode": "ref", "duration": 5, "subjects": ["hero", "sidekick"], "voices": ["sidekick"],
+     "framing": "stills/k01.png",
+     "prompt": "<Set and layout in words>. <Sidekick> turns to <Name> and talks from the first frame to the last. <Name> stays silent with his mouth closed, holding his pose. After his one short line, <Sidekick> stays silent and just stares until the end of the shot.",
+     "audio": "Faint room tone throughout. <Sidekick>, the <what it is>, in the voice of <Audio 1>, says exactly one line and nothing else: \"<short line>\" That one line is the only speech in the shot; after it, silence and faint room tone until the end. No other voices.",
+     "out": 1.6}
+  ]
+}
