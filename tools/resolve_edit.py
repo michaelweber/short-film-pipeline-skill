@@ -82,8 +82,9 @@ from sfx import sfx_clip
 
 os.environ.setdefault("RESOLVE_SCRIPT_API",
                       r"C:\ProgramData\Blackmagic Design\DaVinci Resolve\Support\Developer\Scripting")
-os.environ.setdefault("RESOLVE_SCRIPT_LIB", setting("resolve_script_lib",
-                                                    r"C:\Program Files\Blackmagic Design\DaVinci Resolve\fusionscript.dll"))
+# normpath: Windows resolves fusionscript.dll's own dependencies from its folder only for a backslash path
+os.environ.setdefault("RESOLVE_SCRIPT_LIB", os.path.normpath(setting(
+    "resolve_script_lib", r"C:\Program Files\Blackmagic Design\DaVinci Resolve\fusionscript.dll")))
 sys.path.append(os.path.join(os.environ["RESOLVE_SCRIPT_API"], "Modules"))
 
 FPS = 24
