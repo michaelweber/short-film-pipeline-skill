@@ -11,7 +11,7 @@ camera and light, so the seam doesn't show, and the character still sways a litt
 --box (fractions of the frame) goes tightly around the silent character's head; the crop edge is set --margin
 beyond its inner side (--side right: the character is on the right, so the hold's left is cropped; --side left:
 its right is cropped). The stretch minimises, over --dur seconds at 8 fps inside the box:
-  --metric red     strongly red pixels: an open puppet mouth. Static red in the box (a shirt logo) only
+  --metric red     strongly red pixels: an open felt mouth (puppets). Static red in the box (a shirt logo) only
                    adds a constant; keep moving red props out of the box.
   --metric motion  mean frame-to-frame change: a still face (people; mouths, blinks and nods all count)
 Written to the shot:  "hold": {"from": <start>, "dur": <dur>, "crop": {"left"|"right": <edge>, "softness": ...}}

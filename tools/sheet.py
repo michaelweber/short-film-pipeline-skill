@@ -23,8 +23,8 @@ from PIL import Image, ImageDraw, ImageFont
 
 SHEET_W = 1152
 ROWS_PER_SHEET = 7
-FONT = ImageFont.truetype("arialbd.ttf", 20)
-SMALL = ImageFont.truetype("arialbd.ttf", 11)
+FONT = ImageFont.truetype("C:/Windows/Fonts/arialbd.ttf", 20)
+SMALL = ImageFont.truetype("C:/Windows/Fonts/arialbd.ttf", 11)
 
 
 def probe_duration(path: Path) -> float:

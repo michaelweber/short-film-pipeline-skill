@@ -7,19 +7,19 @@
 
 Shot-list JSON (paths relative to the shot-list file):
 {
-  "title": "My Film", "style": "<global look, prepended to every prompt>",
+  "title": "My Short", "style": "<global look, prepended to every prompt>",
   "audio": "<global soundscape note, appended>",
   "width": 1344, "height": 768, "steps": 20, "seed": 1000, "turbo": false,   # turbo: step-distilled LoRA
-  "subjects": {"hero": {"desc": "<age, build, hair, clothes>", "ref": "refs/hero.png"},        # "ref": a path or a list of
-               "guest": {"desc": "...", "ref": ["refs/g1.png", "refs/g2.png"]}},    #  paths (several real photos)
-  "voices": {"hero": {"desc": "Hero", "audio": "voices/hero.wav"}},
+  "subjects": {"kid": {"desc": "10-year-old boy ...", "ref": "refs/kid.png"},        # "ref": a path or a list of
+               "host": {"desc": "...", "ref": ["refs/h1.png", "refs/h2.png"]}},    #  paths (several real photos)
+  "voices": {"kid": {"desc": "the boy", "audio": "voices/kid.wav"}},
   "styles": {"human": "<alternative look>"},
   "shots": [
     {"id": "s01", "mode": "fl",  "duration": 5, "prompt": "...", "first_frame": "keys/s01.png", "last_frame": null},
     {"id": "s02", "mode": "fl",  "duration": 5, "prompt": "...", "first_frame": "@prev", "style": "human"},
-    {"id": "s03", "mode": "ref", "duration": 8, "prompt": "...", "subjects": ["hero"], "voices": ["hero"],
+    {"id": "s03", "mode": "ref", "duration": 8, "prompt": "...", "subjects": ["kid"], "voices": ["kid"],
      "first_frame": "keys/s03a.png", "guides": [{"t": 4.5, "image": "keys/s03b.png"}]},
-    {"id": "s04", "mode": "ref", "duration": 8, "prompt": "...", "subjects": ["guest"], "framing": "keys/s04.png"}
+    {"id": "s04", "mode": "ref", "duration": 8, "prompt": "...", "subjects": ["host"], "framing": "keys/s04.png"}
   ]
 }
 Modes:
@@ -33,6 +33,14 @@ Modes:
         placement follow it while every face and likeness comes from the subjects' own pictures. The prompt
         gets a subject_definitions block mapping <Subject N>/<Picture N>/<Audio N> tags, as in the Comfy
         templates. At most 9 reference images per shot.
+        "control": {"video": "blocking/p08_depth.mp4", "strength": 1.0, "start": 0.0, "end": 1.0} adds the
+        MiniMax H3 Fun ControlNet Union (models/model_patches, CONTROL_PATCH): the depth/canny/pose video steers
+        every frame (greybox.py writes <id>_depth.mp4 from the blocking). Works in both fl and ref mode.
+        "ref_video": {"video": "blocking/p08_anim.mp4", "desc": "..."} (ref mode, "prompt_format": "h3_ref") passes
+        a blocking animatic as <Video 1>, a camera/motion storyboard ("@anim" in the prompt). Such a shot is
+        non-turbo unless it sets "turbo" itself (the film's turbo is not inherited: turbo makes H3 ignore the video),
+        and first_frame/last_frame are not turned into guides: pins override the video, so a ref-video shot gets
+        guides only from its own explicit "guides" list (blocking_ref2vid research: IoU 0.917 non-turbo unpinned).
   clip — copy an existing video ("source", relative to the shot list) into renders/<id>.mp4, scaled/padded to
         the film size at 24 fps (no GPU work, no "duration"; keeps the source's audio).
   still — render a still image ("source", relative to the shot list) as renders/<id>.mp4 of "duration" seconds,
@@ -42,6 +50,18 @@ Modes:
         shot (Resolve 21.1's API has no keyframe calls, so the move is rendered here, supersampled 2x).
 Renders land in <shotlist dir>/renders/<id>.mp4 with a <id>.json sidecar; a shot re-renders only when its
 effective spec (prompt, frames' content hashes, params) changes.
+Tiers ("tier": "draft"|"final" on the film or a shot, default final; --tier overrides both):
+  final — the settings as written (unchanged behaviour). A final with a control video and a turbo LoRA warns: the
+          turbo+control contour-rim artifact (.claude/skills/short-film-pipeline/prompting.md).
+  draft — a settings preview: short side scaled to 512 (aspect kept, snapped to 32), always turbo (the shot's own
+          preset, else fl8 / ref4, ref8 with a control video), "draft_seeds" seeds (default 3: seed, +1, +2), written
+          to renders/_draft/<id>_s<seed>.mp4 so drafts never touch finals. clip/still/black shots are skipped.
+          Ref-video shots draft NON-turbo at short side 384 (672x384), 20 steps (~80 s per take on the h3 card).
+  Turbo on a ref-video shot warns in either tier.
+"audio_lock": true feeds the shot's "guide_audio" file ("audio_lock": "<path>" names it directly) into
+MiniMaxH3AddGuide's audio input at frame 0, so the dialogue timing is the same in draft and final.
+ComfyUI instances: H3 renders go to H3_URL (env H3_COMFY_URL, default :8188, the h3 card); stills/audio/ASR tools
+use AUX_URL (env AUX_COMFY_URL, default :8189, the aux card). Outputs are fetched from the instance that ran the job.
 """
 from __future__ import annotations
 
@@ -58,7 +78,9 @@ import uuid
 import zlib
 from pathlib import Path
 
-COMFY = os.environ.get("COMFYUI_URL", "http://127.0.0.1:8188").rstrip("/")
+H3_URL = os.environ.get("H3_COMFY_URL", "http://127.0.0.1:8188")  # H3 video only (h3 card)
+AUX_URL = os.environ.get("AUX_COMFY_URL", "http://127.0.0.1:8189")  # stills, depth, TTS/ASR/CLAP (aux card)
+COMFY = H3_URL  # old name, kept for importers
 FPS = 24
 MODELS = {
     "fl": "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
@@ -78,6 +100,12 @@ TURBO_DEFAULT = {"fl": "fl8", "ref": "ref4"}
 TEXT_ENCODER = "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"
 VIDEO_VAE = "minimax_h3_video_vae_fp16.safetensors"
 AUDIO_VAE = "minimax_h3_audio_vae_fp32.safetensors"
+CONTROL_PATCH = "minimax_h3_fun_controlnet_union_2.0_pruned_int8_convrot.safetensors"
+TIERS = ("draft", "final")
+DRAFT_SHORT_SIDE = 512
+DRAFT_SHORT_SIDE_REF_VIDEO = 384  # ref-video drafts: non-turbo, 672x384 (blocking_ref2vid research, runs A/C)
+DRAFT_TURBO = {"fl": "fl8", "ref": "ref4"}  # ref8 when the shot has a control video (throughput report §4.6)
+SIZE_MULTIPLE = 32  # width/height step of MiniMaxH3ImageToVideo / MiniMaxH3ReferenceToVideo
 
 
 def frames_for(seconds: float) -> int:
@@ -87,8 +115,8 @@ def frames_for(seconds: float) -> int:
 
 
 # ---- ComfyUI HTTP ------------------------------------------------------------------
-def http_json(path: str, payload: dict | None = None) -> dict:
-    req = urllib.request.Request(COMFY + path)
+def http_json(path: str, payload: dict | None = None, base: str = H3_URL) -> dict:
+    req = urllib.request.Request(base + path)
     if payload is not None:
         req.data = json.dumps(payload).encode()
         req.add_header("Content-Type", "application/json")
@@ -99,7 +127,7 @@ def http_json(path: str, payload: dict | None = None) -> dict:
         raise RuntimeError(f"{path}: HTTP {e.code}: {e.read().decode(errors='replace')[:4000]}") from None
 
 
-def upload_image(path: Path) -> str:
+def upload_image(path: Path, base: str = H3_URL) -> str:
     """Upload to ComfyUI's input/ under a content-addressed name; returns the LoadImage name."""
     data = path.read_bytes()
     name = f"h3film_{hashlib.sha1(data).hexdigest()[:12]}{path.suffix.lower()}"
@@ -110,10 +138,17 @@ def upload_image(path: Path) -> str:
     ).encode() + data + (
         f'\r\n--{boundary}\r\nContent-Disposition: form-data; name="overwrite"\r\n\r\ntrue\r\n--{boundary}--\r\n'
     ).encode()
-    req = urllib.request.Request(COMFY + "/upload/image", data=body)
+    req = urllib.request.Request(base + "/upload/image", data=body)
     req.add_header("Content-Type", f"multipart/form-data; boundary={boundary}")
     with urllib.request.urlopen(req, timeout=120) as r:
         return json.loads(r.read())["name"]
+
+
+def view(item: dict, base: str = H3_URL, timeout: int = 120) -> bytes:
+    """An output file of a finished job, via /view on the instance that ran it (each instance has its own output dir)."""
+    q = urllib.parse.urlencode({k: item[k] for k in ("filename", "subfolder", "type")})
+    with urllib.request.urlopen(f"{base}/view?{q}", timeout=timeout) as r:
+        return r.read()
 
 
 # ---- graph -------------------------------------------------------------------------
@@ -127,21 +162,41 @@ class Graph:
         return nid
 
 
+def draft_size(w: int, h: int, short_side: int = DRAFT_SHORT_SIDE) -> tuple[int, int]:
+    """(w, h) scaled so the short side is `short_side`, aspect kept, snapped to the model's size step."""
+    scale = short_side / min(w, h)
+    return tuple(max(SIZE_MULTIPLE, round(v * scale / SIZE_MULTIPLE) * SIZE_MULTIPLE) for v in (w, h))
+
+
+def has_ref_video(shot: dict) -> bool:
+    return shot.get("mode", "fl") == "ref" and bool(shot.get("ref_video"))
+
+
 def render_settings(shot: dict, film: dict) -> dict:
-    """Effective model settings for a shot (resolves film/shot turbo presets and step overrides)."""
+    """Effective model settings for a shot (resolves film/shot turbo presets and step overrides, and the draft tier
+    that render() marks with shot["_tier"] = "draft")."""
     mode = shot.get("mode", "fl")
-    turbo = shot.get("turbo", film.get("turbo", False))
+    draft = shot.get("_tier") == "draft"
+    ref_video = has_ref_video(shot)
+    # A reference video only steers non-turbo H3, so the film's turbo is not inherited; an explicit shot turbo is kept.
+    turbo = shot.get("turbo", False if ref_video else film.get("turbo", False))
     if isinstance(turbo, dict):  # film-level per-mode map, e.g. {"fl": "fl4", "ref": "ref8"}
         turbo = turbo.get(mode, False)
+    if draft and not turbo and not ref_video:  # drafts are turbo; the rim artifact is tolerated with control
+        turbo = "ref8" if mode == "ref" and shot.get("control") else DRAFT_TURBO.get(mode, False)
     lora, shift, steps = None, None, film.get("steps", 20)
     if turbo:
         preset = TURBO_PRESETS[TURBO_DEFAULT[mode] if turbo is True else turbo]
         if preset["mode"] != mode:
             raise ValueError(f"{shot['id']}: turbo preset {turbo!r} is for {preset['mode']!r} shots, not {mode!r}")
         lora, shift, steps = preset["lora"], preset.get("shift"), preset["steps"]
-    settings = {"mode": mode, "lora": lora, "shift": shift, "steps": shot.get("steps", steps),
+    settings = {"mode": mode, "lora": lora, "shift": shift,
+                "steps": steps if draft and lora else shot.get("steps", steps),
                 "width": shot.get("width", film.get("width", 1344)),
                 "height": shot.get("height", film.get("height", 768))}
+    if draft:
+        settings["width"], settings["height"] = draft_size(
+            settings["width"], settings["height"], DRAFT_SHORT_SIDE_REF_VIDEO if ref_video else DRAFT_SHORT_SIDE)
     if shot.get("loras"):  # extra style/motion LoRAs, e.g. [["minimax_h3_wushu_action_v5_fl2va.safetensors", 0.5]]
         settings["loras"] = [[name, float(strength)] for name, strength in shot["loras"]]
     return settings
@@ -165,8 +220,19 @@ def build_graph(shot: dict, film: dict, images: dict[str, str], prefix: str) -> 
     clip = g.add("CLIPLoader", clip_name=TEXT_ENCODER, type="minimax", device="default")
     vvae = g.add("VAELoader", vae_name=VIDEO_VAE)
     avae = g.add("VAELoader", vae_name=AUDIO_VAE)
+    control = shot.get("control")
+    if control:
+        # H3 Fun ControlNet Union: a depth/canny/pose video (e.g. greybox.py's <id>_depth.mp4) steers every frame.
+        patch = g.add("ModelPatchLoader", name=control.get("patch", CONTROL_PATCH))
+        video = g.add("LoadVideo", file=images[control["video"]])
+        frames_in = g.add("GetVideoComponents", video=[video, 0])
+        unet = g.add("MiniMaxH3FunControlNetApply", model=[unet, 0], model_patch=[patch, 0], vae=[vvae, 0],
+                     strength=control.get("strength", 1.0), start_percent=control.get("start", 0.0),
+                     end_percent=control.get("end", 1.0), control_video=[frames_in, 0])
     load = lambda p: [g.add("LoadImage", image=images[p]), 0]  # noqa: E731
     load_audio = lambda p: [g.add("LoadAudio", audio=images[p]), 0]  # noqa: E731
+    lock = shot.get("_audio_lock")  # locked guide audio (audio_lock): anchored at frame 0, as P01/P15 did
+    locked = False
 
     if mode == "fl":
         kw = {}
@@ -180,16 +246,25 @@ def build_graph(shot: dict, film: dict, images: dict[str, str], prefix: str) -> 
     elif mode == "ref":
         kw = {f"ref_images.ref_image_{i}": load(p) for i, p in enumerate(shot["_refs"])}
         kw |= {f"ref_audios.ref_audio_{i}": load_audio(p) for i, p in enumerate(shot["_voices"])}
+        if shot.get("ref_video"):
+            rv = g.add("LoadVideo", file=images[shot["ref_video"]["video"]])
+            kw["ref_videos.ref_video_0"] = [g.add("GetVideoComponents", video=[rv, 0]), 0]
         cond = g.add("MiniMaxH3ReferenceToVideo", clip=[clip, 0], vae=[vvae, 0], audio_vae=[avae, 0],
                      prompt=shot["_prompt"], width=w, height=h, length=length, ref_image_size="match", **kw)
         positive, latent = [cond, 0], [cond, 1]
         for guide in shot.get("guides", []):
             idx = min(round(guide["t"] * FPS), length - 1)
             gid = g.add("MiniMaxH3AddGuide", positive=positive, latent=latent, frame_idx=idx,
-                        vae=[vvae, 0], audio_vae=[avae, 0], image=load(guide["image"]))
+                        vae=[vvae, 0], audio_vae=[avae, 0], image=load(guide["image"]),
+                        **({"audio": load_audio(lock)} if lock and idx == 0 and not locked else {}))
+            locked = locked or bool(lock and idx == 0)
             positive = [gid, 0]
     else:
         raise ValueError(f"{shot['id']}: unknown mode {mode!r}")
+    if lock and not locked:  # no frame-0 guide to carry it: an audio-only guide
+        gid = g.add("MiniMaxH3AddGuide", positive=positive, latent=latent, frame_idx=0, audio_vae=[avae, 0],
+                    audio=load_audio(lock))
+        positive = [gid, 0]
 
     noise = g.add("RandomNoise", noise_seed=shot["_seed"])
     sampler = g.add("KSamplerSelect", sampler_name="res_multistep")
@@ -205,8 +280,115 @@ def build_graph(shot: dict, film: dict, images: dict[str, str], prefix: str) -> 
 
 
 # ---- prompts -----------------------------------------------------------------------
+def stamp(t: float) -> str:
+    return f"{int(t // 60):02d}:{t % 60:06.3f}"
+
+
+def compose_h3_ref(shot: dict, film: dict) -> tuple[str, list[str]]:
+    """A ref-mode prompt in MiniMax's own six-section Ref2VA format (subject_definitions, summary,
+    retention_analysis, detailed_description, overall_soundscape, non_diegetic_music). In "prompt" (the
+    detailed_description body, starting "[Shot 1]"), "@<subject key>" becomes <Subject N>, "@key<n>" the n-th
+    guide keyframe's <Picture N> and "@frame" the framing still. Speakers (S1, S2, ... in "speakers" order,
+    default the shot's voices) are written by hand in the prompt; each voice is bound to the subject of the same
+    key. "audio" is the overall_soundscape, "music" the non_diegetic_music (default N/A).
+    With a "ref_video" the wording follows the blocking_ref2vid research (runs A/C/D): each subject in
+    ref_video["motion"] ({key: "position, step and hand signal"}; default every subject, "position, movement and
+    timing") takes its appearance from its Pictures and that motion from <Video 1>; other subjects are sets redrawn
+    from <Video 1>'s viewpoint. ref_video["desc"] says what the video is, ref_video["defines"] overrides what it
+    defines; <Video 1> is partially_preserved and its placeholder surfaces become the subjects. A subject's optional
+    "look" (a detail list) follows its source clause, as in the research prompts."""
+    import re
+    refs: list[str] = []
+    subject_tag: dict[str, str] = {}
+    defs, keep = [], []
+    video = shot.get("ref_video")
+    motion = (video.get("motion") or {k: "position, movement and timing" for k in shot.get("subjects", [])}
+              if video else {})
+    for n, key in enumerate(shot.get("subjects", []), start=1):
+        subj = film["subjects"][key]
+        own = subj["ref"] if isinstance(subj["ref"], list) else [subj["ref"]]
+        tags = [f"<Picture {len(refs) + k}>" for k in range(1, len(own) + 1)]
+        refs += own
+        shown = tags[0] if len(tags) == 1 else ", ".join(tags[:-1]) + " and " + tags[-1]
+        subject_tag[key] = f"<Subject {n}>"
+        look = f": {subj['look']}" if subj.get("look") else ""  # optional detail list, as in the research prompts
+        if key in motion:  # appearance from its pictures, motion from the blocking video
+            defs.append(f"<Subject {n}> is {subj['desc']} whose appearance comes from {shown} and whose {motion[key]} "
+                        f"come from <Video 1>{look}. Its face, build, costume and colours come only from {shown}.")
+            keep.append(f"<Subject {n}> (appears in [Shot 1]): fully_preserved - face, build, costume, colours and "
+                        f"carried props from {shown}.")
+        elif video:  # a set: design from its picture, viewpoint from the video
+            defs.append(f"<Subject {n}> is {subj['desc']} in {shown}{look}. {shown} supplies the set design, palette and "
+                        f"drawing style; it is a design reference, not a shot to cut to.")
+            keep.append(f"<Subject {n}> (appears in [Shot 1]): partially_preserved - the design, palette and drawing "
+                        f"style of {shown}, redrawn from the viewpoint of <Video 1>.")
+        else:
+            defs.append(f"<Subject {n}> is {subj['desc']}, shown in {shown}.")
+            keep.append(f"<Subject {n}> (appears in [Shot 1]): fully_preserved - face, build, costume, colours and "
+                        f"carried props are retained exactly as in {shown}.")
+    pictures = {}
+    if shot.get("framing"):
+        refs.append(shot["framing"])
+        pictures["frame"] = f"<Picture {len(refs)}>"
+        defs.append(f"{pictures['frame']} is a storyboard reference for [Shot 1], defining its viewpoint, subject "
+                    f"placement and composition only; every face and costume comes from the subjects' own pictures.")
+        keep.append(f"{pictures['frame']} ([Shot 1] storyboard): weak_reference - viewpoint and placement only.")
+    for m, guide in enumerate(shot.get("guides", []), start=1):
+        if guide["image"] not in refs:
+            refs.append(guide["image"])
+        tag = f"<Picture {refs.index(guide['image']) + 1}>"
+        pictures[f"key{m}"] = tag
+        role = ("the first frame" if guide["t"] == 0 else "the last frame" if guide["t"] >= shot["duration"]
+                else f"the keyframe at {stamp(guide['t'])}")
+        defs.append(f"{tag} is {role} of [Shot 1], showing {guide.get('desc', 'the frame at that moment')}.")
+        keep.append(f"{tag} ([Shot 1] {role}): fully_preserved - composition, poses, flat cel-shaded colours and "
+                    f"linework are matched exactly at {stamp(guide['t'])}.")
+    if len(refs) > 9:
+        raise ValueError(f"{shot['id']}: {len(refs)} reference images; H3 takes at most 9")
+    if video:
+        pictures["anim"] = "<Video 1>"
+        subjects = [subject_tag[k] for k in shot.get("subjects", [])]
+        became = (subjects[0] if len(subjects) == 1 else ", ".join(subjects[:-1]) + " and " + subjects[-1]
+                  ) if subjects else "the subjects"
+        defs.append(f"<Video 1> is {video.get('desc', 'a low-resolution 3D blocking render of [Shot 1]')}. "
+                    + video.get("defines", "It defines the camera position and camera path, the framing, where each "
+                                "figure stands and which way it faces, and the timing of every movement.")
+                    + " Its untextured surfaces, stand-in figures and lighting are placeholders only.")
+        keep.append(f"<Video 1> (camera path and staging): partially_preserved - camera path, framing, figure "
+                    f"placement and movement timing are followed; every placeholder surface becomes {became}.")
+    speakers = shot.get("speakers", shot.get("voices", []))
+    for n, key in enumerate(shot.get("voices", []), start=1):
+        who = subject_tag.get(key, film["voices"][key]["desc"])
+        defs.append(f"<Audio {n}> is the voice-timbre reference for {who} (S{speakers.index(key) + 1}).")
+        keep.append(f"<Audio {n}>: reference - {who} speaks new words in exactly this voice timbre, pitch and "
+                    f"accent without copying the original signal.")
+
+    def expand(text: str) -> str:
+        return re.sub(r"@(\w+)", lambda m: pictures.get(m.group(1)) or subject_tag.get(m.group(1)) or m.group(0),
+                      text)
+
+    task = "keyframe completion + reference generation" if shot.get("guides") else "reference generation"
+    if shot.get("voices"):
+        task += " + audio reference"
+    style = film.get("styles", {}).get(shot["style"]) if shot.get("style") else film.get("style")
+    body = expand(shot["prompt"])
+    unresolved = re.findall(r"@\w+", body)
+    if unresolved:
+        raise ValueError(f"{shot['id']}: unknown tokens {unresolved}")
+    return "\n\n".join([
+        "subject_definitions:\n" + "\n".join(defs),
+        f"summary:\n[{task}] {expand(shot.get('summary', ''))}".rstrip(),
+        "retention_analysis:\n" + "\n".join(keep),
+        f"detailed_description:\n{style}\n{body}" if style else f"detailed_description:\n{body}",
+        f"overall_soundscape:\n{expand(shot.get('audio', 'N/A'))}",
+        f"non_diegetic_music:\n{shot.get('music', film.get('music_line', 'N/A'))}",
+    ]), refs
+
+
 def compose_prompt(shot: dict, film: dict) -> tuple[str, list[str]]:
-    """Returns (prompt, ordered reference image paths: each subject's pictures, then the framing still)."""
+    """Returns the prompt and ordered picture paths: subjects, framing, then ref-mode guide frames."""
+    if shot.get("mode") == "ref" and film.get("prompt_format") == "h3_ref":
+        return compose_h3_ref(shot, film)
     parts: list[str] = []
     refs: list[str] = []
     if shot.get("mode") == "ref":
@@ -287,10 +469,12 @@ def kenburns_frames(src: Path, w: int, h: int, kb: dict, n: int, sid: str):
         yield img.transform((big_w, big_h), Image.Transform.EXTENT, box, Image.Resampling.BICUBIC).reduce(2).tobytes()
 
 
-def wait_for(prompt_id: str, label: str) -> dict:
+
+
+def wait_for(prompt_id: str, label: str, base: str = H3_URL) -> dict:
     t0 = time.time()
     while True:
-        hist = http_json(f"/history/{prompt_id}")
+        hist = http_json(f"/history/{prompt_id}", base=base)
         if prompt_id in hist:
             entry = hist[prompt_id]
             status = entry.get("status", {})
@@ -303,20 +487,19 @@ def wait_for(prompt_id: str, label: str) -> dict:
         time.sleep(5)
 
 
-def fetch_video(entry: dict, dest: Path) -> None:
+def fetch_video(entry: dict, dest: Path, base: str = H3_URL) -> None:
     for node_out in entry["outputs"].values():
         for item in node_out.get("images", []) + node_out.get("videos", []) + node_out.get("gifs", []):
-            if item.get("filename", "").endswith((".mp4", ".webm", ".mkv")):
-                q = urllib.parse.urlencode({k: item[k] for k in ("filename", "subfolder", "type")})
-                with urllib.request.urlopen(f"{COMFY}/view?{q}", timeout=300) as r:
-                    dest.write_bytes(r.read())
+            if item.get("type") == "output" and item.get("filename", "").endswith((".mp4", ".webm", ".mkv")):
+                dest.write_bytes(view(item, base, timeout=300))
                 return
     raise RuntimeError(f"no video in outputs: {json.dumps(entry['outputs'])[:1000]}")
 
 
-def render(shotlist: Path, only: set[str] | None, force: bool, dry_run: bool, restamp: bool = False) -> None:
+def render(shotlist: Path, only: set[str] | None, force: bool, dry_run: bool, restamp: bool = False,
+           tier: str | None = None, draft_seeds: int | None = None) -> None:
     film = json.loads(shotlist.read_text(encoding="utf-8"))
-    root = shotlist.parent
+    root = shotlist.resolve().parent
     renders = root / "renders"
     renders.mkdir(exist_ok=True)
     slug = shotlist.parent.name
@@ -329,6 +512,12 @@ def render(shotlist: Path, only: set[str] | None, force: bool, dry_run: bool, re
             continue
         # Default seed keys off the shot id, so inserting or reordering shots doesn't re-roll the others.
         shot["_seed"] = shot.get("seed", film.get("seed", 0) + zlib.crc32(sid.encode()) % 100_000)
+        shot_tier = tier or shot.get("tier", film.get("tier", "final"))
+        if shot_tier not in TIERS:
+            raise SystemExit(f"{sid}: unknown tier {shot_tier!r} (one of {', '.join(TIERS)})")
+        if shot_tier == "draft" and shot.get("mode") in ("clip", "still", "black", "motion_graphic"):
+            print(f"- {sid}: {shot['mode']} shot, no draft tier")
+            continue
         if shot.get("mode") == "clip":
             src = root / shot["source"]
             if not src.exists():
@@ -355,6 +544,22 @@ def render(shotlist: Path, only: set[str] | None, force: bool, dry_run: bool, re
                             "-c:a", "aac", "-ar", "48000", "-ac", "2", str(dest)], check=True)
             sidecar.write_text(json.dumps({"digest": digest, "source": shot["source"]}, indent=2), encoding="utf-8")
             print(f"+ {sid}: clip {shot['source']}")
+            continue
+        if shot.get("mode") == "motion_graphic":
+            import motion_graphic  # PIL frame renderer; no GPU
+            settings = render_settings(shot, film)
+            w, h = settings["width"], settings["height"]
+            digest = motion_graphic.digest(root, shot, w, h)
+            sidecar = dest.with_suffix(".json")
+            if not force and dest.exists() and sidecar.exists() and json.loads(sidecar.read_text())["digest"] == digest:
+                print(f"= {sid}: up to date")
+                continue
+            if dry_run:
+                print(f"~ {sid}: motion graphic (dry run)")
+                continue
+            motion_graphic.render(root, shot, w, h, dest)
+            sidecar.write_text(json.dumps({"digest": digest, "graphic": shot["graphic"]}, indent=2), encoding="utf-8")
+            print(f"+ {sid}: motion graphic {shot['graphic']['template']}")
             continue
         if shot.get("mode") == "still":
             src = root / shot["source"]
@@ -397,6 +602,13 @@ def render(shotlist: Path, only: set[str] | None, force: bool, dry_run: bool, re
             sidecar.write_text(json.dumps({"digest": digest, "source": shot["source"]}, indent=2), encoding="utf-8")
             print(f"+ {sid}: still {shot['source']}")
             continue
+        if has_ref_video(shot):
+            # The reference video carries camera and staging; pinned frames would override it. Guides are opt-in:
+            # only the shot's own "guides" list, never first_frame/last_frame turned into pins.
+            dropped = [k for k in ("first_frame", "last_frame") if shot.pop(k, None)]
+            if dropped:
+                print(f"! {sid}: ref-video shot, ignoring {'/'.join(dropped)} (list pins in \"guides\" to keep them)",
+                      file=sys.stderr)
         # resolve image paths (+ "@prev" chaining to the previous shot's last frame)
         for key in ("first_frame", "last_frame"):
             if shot.get(key) == "@prev":
@@ -421,59 +633,107 @@ def render(shotlist: Path, only: set[str] | None, force: bool, dry_run: bool, re
         shot["_prompt"], shot["_refs"] = compose_prompt(shot, film)
         shot["_refs"] = [str(root / p) for p in shot["_refs"]]
         shot["_voices"] = [str(root / film["voices"][k]["audio"]) for k in shot.get("voices", [])]
+        if shot.get("control"):
+            shot["control"] = dict(shot["control"], video=str(root / shot["control"]["video"]))
+        if shot.get("ref_video"):
+            shot["ref_video"] = dict(shot["ref_video"], video=str(root / shot["ref_video"]["video"]))
+        if shot.get("audio_lock"):
+            lock = shot["audio_lock"] if isinstance(shot["audio_lock"], str) else shot.get("guide_audio")
+            if not lock:
+                raise SystemExit(f"{sid}: audio_lock needs a \"guide_audio\" file (or \"audio_lock\": \"<path>\")")
+            shot["_audio_lock"] = str(root / lock)
         local = [Path(p) for p in (shot.get("first_frame"), shot.get("last_frame"), *shot["_refs"],
-                                   *(gd["image"] for gd in shot.get("guides", [])), *shot["_voices"]) if p]
+                                   *(gd["image"] for gd in shot.get("guides", [])), *shot["_voices"],
+                                   (shot.get("control") or {}).get("video"), (shot.get("ref_video") or {}).get("video"),
+                                   shot.get("_audio_lock")) if p]
         for p in local:
             if not p.exists():
                 raise SystemExit(f"{sid}: missing input {p}")
-        # Cache key = everything that changes the rendered pixels/audio. Narration, bed, the edit-only
-        # titles/zoom/hold/out/pillarbox and the literal seed/turbo/steps keys are excluded; their effective
-        # values are covered by "_seed" and "_render".
-        spec = {k: v for k, v in shot.items() if k not in (
-            "seed", "turbo", "steps", "width", "height", "narration", "bed", "titles", "zoom", "hold", "out",
-            "pillarbox", "first_frame", "last_frame", "guides", "_refs", "_voices")}
-        spec["_images"] = [hashlib.sha1(p.read_bytes()).hexdigest() for p in local]
-        spec["_guides"] = [g["t"] for g in shot.get("guides", [])]
-        spec["_render"] = render_settings(shot, film)
-        digest = hashlib.sha1(json.dumps(spec, sort_keys=True).encode()).hexdigest()
-        sidecar = dest.with_suffix(".json")
-        if not force and dest.exists() and sidecar.exists() and json.loads(sidecar.read_text())["digest"] == digest:
-            print(f"= {sid}: up to date")
-            continue
-        if restamp and dest.exists() and sidecar.exists():
-            meta = json.loads(sidecar.read_text())
-            sidecar.write_text(json.dumps(meta | {"digest": digest}, indent=2), encoding="utf-8")
-            print(f"# {sid}: restamped existing render as current")
-            continue
-        if shot.get("mode") == "black":
-            # Picture-free beat (e.g. a character losing sight): black frames + a faint room-tone bed.
-            if not dry_run:
-                w, h = render_settings(shot, film)["width"], render_settings(shot, film)["height"]
-                d = frames_for(shot["duration"]) / FPS
-                subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i",
-                                f"color=c=black:s={w}x{h}:r={FPS}:d={d:.3f}", "-f", "lavfi", "-i",
-                                f"anoisesrc=color=brown:amplitude=0.01:r=48000:d={d:.3f}", "-c:v", "libx264",
-                                "-pix_fmt", "yuv420p", "-c:a", "aac", "-ac", "2", "-shortest", str(dest)], check=True)
-                sidecar.write_text(json.dumps({"digest": digest, "seed": shot["_seed"], "prompt": "black"}, indent=2),
-                                   encoding="utf-8")
-            print(f"+ {sid}: black {shot['duration']}s")
-            continue
-        uploaded = {str(p): (upload_image(p) if not dry_run else p.name) for p in local}
-        graph = build_graph(shot, film, uploaded, prefix=f"h3film/{slug}/{sid}")
-        (renders / f"{sid}.api.json").write_text(json.dumps(graph, indent=2), encoding="utf-8")
-        if dry_run:
-            print(f"~ {sid}: graph written ({shot.get('mode', 'fl')}, {frames_for(shot['duration'])} frames)")
-            continue
-        t0 = time.time()
-        resp = http_json("/prompt", {"prompt": graph, "client_id": "h3_render"})
-        if resp.get("node_errors"):
-            raise RuntimeError(f"{sid}: {json.dumps(resp['node_errors'])[:3000]}")
-        entry = wait_for(resp["prompt_id"], sid)
-        fetch_video(entry, dest)
-        sidecar.write_text(json.dumps({"digest": digest, "prompt_id": resp["prompt_id"], "seed": shot["_seed"],
-                                       "seconds": round(time.time() - t0), "prompt": shot["_prompt"]}, indent=2),
-                           encoding="utf-8")
-        print(f"\r+ {sid}: {dest} ({time.time() - t0:.0f}s)          ")
+        draft = shot_tier == "draft"
+        if draft:
+            # Settings preview: low-res takes of seed, seed+1, ... under renders/_draft, never over the final.
+            shot["_tier"] = "draft"
+            n = draft_seeds or int(shot.get("draft_seeds", film.get("draft_seeds", 3)))
+            (renders / "_draft").mkdir(exist_ok=True)
+            takes = [(shot["_seed"] + k, renders / "_draft" / f"{sid}_s{shot['_seed'] + k}.mp4") for k in range(n)]
+        else:
+            takes = [(shot["_seed"], dest)]
+            if shot.get("control") and render_settings(shot, film)["lora"]:
+                print(f"! {sid}: final with a control video and turbo LoRA {render_settings(shot, film)['lora']}: "
+                      "expect the turbo+control contour-rim artifact (prompting.md); render finals with control "
+                      "non-turbo", file=sys.stderr)
+        if has_ref_video(shot) and render_settings(shot, film)["lora"]:
+            print(f"! {sid}: ref-video shot with turbo LoRA {render_settings(shot, film)['lora']}: turbo makes H3 ignore "
+                  "the reference video (blocking_ref2vid research: bbox IoU 0.0, invented camera); drop \"turbo\"",
+                  file=sys.stderr)
+        image_hashes = [hashlib.sha1(p.read_bytes()).hexdigest() for p in local]
+        uploaded: dict[str, str] | None = None
+        for seed, out in takes:
+            shot["_seed"] = seed
+            # Cache key = everything that changes the rendered pixels/audio. Narration, bed, the edit-only
+            # titles/zoom/hold/out/pillarbox and the literal seed/turbo/steps/tier keys are excluded; their effective
+            # values are covered by "_seed", "_tier" (drafts only, so final keys are unchanged) and "_render".
+            spec = {k: v for k, v in shot.items() if k not in (
+                "seed", "turbo", "steps", "width", "height", "narration", "bed", "titles", "zoom", "hold", "out", "in",
+                "sfx",
+                "pillarbox", "first_frame", "last_frame", "guides", "_refs", "_voices", "tier", "draft_seeds",
+                "_audio_lock")}
+            spec["_images"] = image_hashes
+            spec["_guides"] = [g["t"] for g in shot.get("guides", [])]
+            spec["_render"] = render_settings(shot, film)
+            if shot.get("ref_video") or shot.get("control"):
+                # Older versions could cache LoadVideo's input preview instead of SaveVideo's generated output.
+                spec["_video_output"] = "generated"
+            digest = hashlib.sha1(json.dumps(spec, sort_keys=True).encode()).hexdigest()
+            sidecar = out.with_suffix(".json")
+            label = f"{sid} s{seed}" if draft else sid
+            if not force and out.exists() and sidecar.exists() and json.loads(sidecar.read_text())["digest"] == digest:
+                print(f"= {label}: up to date")
+                continue
+            if restamp and out.exists() and sidecar.exists():
+                meta = json.loads(sidecar.read_text())
+                sidecar.write_text(json.dumps(meta | {"digest": digest}, indent=2), encoding="utf-8")
+                print(f"# {label}: restamped existing render as current")
+                continue
+            if shot.get("mode") == "black":
+                # Picture-free beat (e.g. a character losing sight): black frames + a faint room-tone bed.
+                if not dry_run:
+                    w, h = render_settings(shot, film)["width"], render_settings(shot, film)["height"]
+                    d = frames_for(shot["duration"]) / FPS
+                    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i",
+                                    f"color=c=black:s={w}x{h}:r={FPS}:d={d:.3f}", "-f", "lavfi", "-i",
+                                    f"anoisesrc=color=brown:amplitude=0.01:r=48000:d={d:.3f}", "-c:v", "libx264",
+                                    "-pix_fmt", "yuv420p", "-c:a", "aac", "-ac", "2", "-shortest", str(out)],
+                                   check=True)
+                    sidecar.write_text(json.dumps({"digest": digest, "seed": seed, "prompt": "black"}, indent=2),
+                                       encoding="utf-8")
+                print(f"+ {sid}: black {shot['duration']}s")
+                continue
+            if uploaded is None:
+                uploaded = {str(p): (upload_image(p, base=H3_URL) if not dry_run else p.name) for p in local}
+            prefix = f"h3film/{slug}/_draft/{out.stem}" if draft else f"h3film/{slug}/{sid}"
+            graph = build_graph(shot, film, uploaded, prefix=prefix)
+            api = out.with_suffix(".api.json")
+            api.write_text(json.dumps(graph, indent=2), encoding="utf-8")
+            if dry_run:
+                if draft:
+                    r = render_settings(shot, film)
+                    print(f"~ {label}: draft graph written ({shot.get('mode', 'fl')}, {frames_for(shot['duration'])} "
+                          f"frames, {r['width']}x{r['height']}, {r['lora']}, {r['steps']} steps) -> {api}")
+                else:
+                    print(f"~ {sid}: graph written ({shot.get('mode', 'fl')}, {frames_for(shot['duration'])} frames)")
+                continue
+            t0 = time.time()
+            resp = http_json("/prompt", {"prompt": graph, "client_id": "h3_render"}, base=H3_URL)
+            if resp.get("node_errors"):
+                raise RuntimeError(f"{label}: {json.dumps(resp['node_errors'])[:3000]}")
+            entry = wait_for(resp["prompt_id"], label, base=H3_URL)
+            fetch_video(entry, out, base=H3_URL)
+            sidecar.write_text(json.dumps({"digest": digest, "prompt_id": resp["prompt_id"], "seed": seed,
+                                           **({"tier": "draft"} if draft else {}),
+                                           "seconds": round(time.time() - t0), "prompt": shot["_prompt"]}, indent=2),
+                               encoding="utf-8")
+            print(f"\r+ {label}: {out} ({time.time() - t0:.0f}s)          ")
 
 
 def main() -> None:
@@ -484,8 +744,11 @@ def main() -> None:
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--restamp", action="store_true",
                     help="accept existing renders of the selected shots as current (after a cache-key-only change)")
+    ap.add_argument("--tier", choices=TIERS, help="override every shot's tier (draft: 512p turbo seed batch)")
+    ap.add_argument("--draft-seeds", type=int, help="seeds per draft shot (default: the shot/film draft_seeds, else 3)")
     a = ap.parse_args()
-    render(a.shotlist, set(a.only.split(",")) if a.only else None, a.force, a.dry_run, a.restamp)
+    render(a.shotlist, set(a.only.split(",")) if a.only else None, a.force, a.dry_run, a.restamp, a.tier,
+           a.draft_seeds)
 
 
 if __name__ == "__main__":

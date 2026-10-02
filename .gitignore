@@ -1,3 +1,5 @@
 __pycache__/
 *.pyc
 film/
+tools/local_settings.json
+.gpu_leases/

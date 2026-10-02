@@ -5,13 +5,16 @@
 
 Resolve must be running with Preferences > General > External scripting using = Local.
 
-One Resolve project per film ("<project_prefix><film dir>", e.g. film_my_trailer). Every run adds a new
+One Resolve project per film ("<project_prefix><film dir>"; project_prefix defaults to the resolve_project_prefix
+setting, see tools/pipeline_settings.py, else ""). Every run adds a new
 timeline "<title> NN", so earlier cuts stay in the project. Layout:
   V1 "Picture"    every shot's render
   A1 "Shot audio" each shot's H3 audio, or its vocal-free stem for shots with "bed": "instruments"; nothing for
                   shots with "bed": "none" (e.g. silent B-roll that should carry only music and narration)
   A2 "Narration"  the narration clips from narrate.py, each at its shot time + "at"
   A3 "Music"      only if the film has "music": the tools/music.py score, ducked under narration and dialogue
+  next "SFX"      only if some shot has "sfx": the tools/sfx.py clips at shot start + "at", "gain_db" each, not
+                  ducked (one track; clips must not overlap)
   V2 "Holds"      only if some shot has a "hold": a looping, cropped stretch of the shot's own render over itself
   next "Letterbox" only if the film has "letterbox": one full-length clip of black bars over everything below
   next "Titles"   per-shot text overlays (shot "titles"; title k of a shot on its own track, since they overlap):
@@ -37,6 +40,8 @@ Per-shot extras:
                                                                          #  black timeline background shows through
   "out": 2.4                                                             # end the shot here (seconds), e.g. to drop
                                                                          #  words H3 invented after a short line
+  "in": 0.9                                                              # start the shot here (render seconds), e.g.
+                                                                         #  to drop words H3 invented before a line
   "hold": {"from": 3.0, "dur": 2.0, "crop": {"left": 0.58, "softness": 30}}
             # for the whole shot, lay [from, from+dur) of the same render over it, played forward and backward on a
             # loop and cropped ("crop": fractions of the frame removed per side; softness feathers the edge). Use:
@@ -71,19 +76,14 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 
 import music
-from narrate import dialogue_spans, duration, instruments_stem, plan, report, tts
+from narrate import cut_speech, duration, instruments_stem, plan, report, tts
+from pipeline_settings import setting
+from sfx import sfx_clip
 
-# Blackmagic's default scripting locations; set RESOLVE_SCRIPT_API / RESOLVE_SCRIPT_LIB for other installs.
-_RESOLVE_DEFAULTS = {
-    "win32": (r"C:\ProgramData\Blackmagic Design\DaVinci Resolve\Support\Developer\Scripting",
-              r"C:\Program Files\Blackmagic Design\DaVinci Resolve\fusionscript.dll"),
-    "darwin": ("/Library/Application Support/Blackmagic Design/DaVinci Resolve/Developer/Scripting",
-               "/Applications/DaVinci Resolve/DaVinci Resolve.app/Contents/Libraries/Fusion/fusionscript.so"),
-    "linux": ("/opt/resolve/Developer/Scripting", "/opt/resolve/libs/Fusion/fusionscript.so"),
-}
-_api, _lib = _RESOLVE_DEFAULTS.get(sys.platform, _RESOLVE_DEFAULTS["linux"])
-os.environ.setdefault("RESOLVE_SCRIPT_API", _api)
-os.environ.setdefault("RESOLVE_SCRIPT_LIB", _lib)
+os.environ.setdefault("RESOLVE_SCRIPT_API",
+                      r"C:\ProgramData\Blackmagic Design\DaVinci Resolve\Support\Developer\Scripting")
+os.environ.setdefault("RESOLVE_SCRIPT_LIB", setting("resolve_script_lib",
+                                                    r"C:\Program Files\Blackmagic Design\DaVinci Resolve\fusionscript.dll"))
 sys.path.append(os.path.join(os.environ["RESOLVE_SCRIPT_API"], "Modules"))
 
 FPS = 24
@@ -91,7 +91,8 @@ LEAD_S, TAIL_S, HOLD_S = 0.15, 0.25, 0.35   # duck ahead of the first word, rele
 XFADE = 6                                    # frames per ducking ramp (0 dB audio cross fade, centred on the cut)
 MIN_SEG = 2 * XFADE                          # shorter bed pieces are folded into their neighbour
 NARRATION_GAIN_DB = 4.0                      # clips are normalised to -20 LUFS at TTS time; sit them above the bed
-LOUDNESS_PASSES = 4                          # render/measure/shift rounds to land the delivery on "loudness_lufs"
+LOUDNESS_PASSES = 6                          # render/measure/shift rounds to land the delivery on "loudness_lufs"
+                                             # (4 left an episode-length cut at -14.7: SFX peaks pull the limiter down)
 
 
 def connect():
@@ -133,7 +134,7 @@ class Media:
 
 def open_project(resolve, film: dict, root: Path):
     pm = resolve.GetProjectManager()
-    name = film.get("project_prefix", "film_") + root.name
+    name = film.get("project_prefix", setting("resolve_project_prefix", "")) + root.name
     project = pm.LoadProject(name)
     if not project:
         project = pm.CreateProject(name)
@@ -157,10 +158,14 @@ def video_tracks(film: dict) -> dict[str, int | None]:
 
 
 def new_timeline(project, film: dict, media: Media):
-    title = film.get("title", "film")
+    # Resolve refuses timeline names with some punctuation (a ":" made CreateEmptyTimeline return None).
+    title = re.sub(r"[^\w .-]+", " ", film.get("title", "film")).strip()
+    title = re.sub(r"\s+", " ", title)
     names = [project.GetTimelineByIndex(i + 1).GetName() for i in range(project.GetTimelineCount())]
     taken = [int(m.group(1)) for n in names if (m := re.fullmatch(re.escape(title) + r" (\d+)", n))]
     tl = media.mp.CreateEmptyTimeline(f"{title} {max(taken, default=0) + 1:02d}")
+    if tl is None:
+        raise SystemExit(f"Resolve could not create timeline {title!r}")
     project.SetCurrentTimeline(tl)
     if not tl.AddTrack("audio", "mono"):
         raise SystemExit("could not add the narration track")
@@ -168,6 +173,10 @@ def new_timeline(project, film: dict, media: Media):
         if not tl.AddTrack("audio", "stereo"):
             raise SystemExit("could not add the music track")
         tl.SetTrackName("audio", 3, "Music")
+    if any(s.get("sfx") for s in film["shots"]):
+        if not tl.AddTrack("audio", "mono"):
+            raise SystemExit("could not add the SFX track")
+        tl.SetTrackName("audio", sfx_track(film), "SFX")
     tracks = video_tracks(film)
     for key, label in (("holds", "Holds"), ("letterbox", "Letterbox")):
         if tracks[key] is not None:
@@ -186,9 +195,9 @@ def new_timeline(project, film: dict, media: Media):
     return tl
 
 
-TITLE_FONT = "impact.ttf"
-DOC_FONT = "bahnschrift.ttf"     # variable font: weight picked by variation name
-DOC_FALLBACK = "segoeuib.ttf"    # when Pillow can't set font variations
+TITLE_FONT = "C:/Windows/Fonts/impact.ttf"
+DOC_FONT = "C:/Windows/Fonts/bahnschrift.ttf"     # variable font: weight picked by variation name
+DOC_FALLBACK = "C:/Windows/Fonts/segoeuib.ttf"    # when Pillow can't set font variations
 DOC_GOLD = "#F2C230"
 
 
@@ -382,8 +391,10 @@ def build(project, film: dict, root: Path, clips: list[dict], events: list[dict]
         n = int(video.GetClipProperty("Frames"))
         if "out" in shot:
             n = min(n, round(shot["out"] * FPS))
-        (vitem,) = mp.AppendToTimeline([{"mediaPoolItem": video, "startFrame": 0, "endFrame": n, "mediaType": 1,
+        head = round(shot.get("in", 0.0) * FPS)  # "in": frames dropped from the head (invented words before a line)
+        (vitem,) = mp.AppendToTimeline([{"mediaPoolItem": video, "startFrame": head, "endFrame": n, "mediaType": 1,
                                          "trackIndex": 1, "recordFrame": t0 + frame}])
+        n -= head
         if "zoom" in shot:
             set_zoom(vitem, float(shot["zoom"]), c["id"])
         if "pillarbox" in shot:
@@ -403,9 +414,9 @@ def build(project, film: dict, root: Path, clips: list[dict], events: list[dict]
         if c["bed"] != "none":
             bed_path = instruments_stem(c["video"]) if c["bed"] == "instruments" else c["video"]
             bed = media.get(bed_path)
-            usable = min(n, int(duration(bed_path) * FPS))
+            usable = min(n, int(duration(bed_path) * FPS) - head)
             pieces = bed_pieces(frame, frame + usable, windows)
-            items = place_pieces(mp, bed, frame, pieces, 1, t0, (0.0, duck_db), c["id"])
+            items = place_pieces(mp, bed, frame - head, pieces, 1, t0, (0.0, duck_db), c["id"])
         tl.SetClipsLinked([vitem, *items], True)
         frame += n
     if tracks["letterbox"] is not None:
@@ -422,7 +433,28 @@ def build(project, film: dict, root: Path, clips: list[dict], events: list[dict]
         item.SetProperty("AudioVolume", NARRATION_GAIN_DB)
     if "music" in film:
         place_music(film, root, clips, events, media, t0, frame)
+    place_sfx(film, root, clips, shots, media, t0)
     return tl
+
+
+def sfx_track(film: dict) -> int:
+    return 4 if "music" in film else 3
+
+
+def place_sfx(film: dict, root: Path, clips: list[dict], shots: dict, media: Media, t0: int) -> None:
+    """Each shot "sfx" clip (tools/sfx.py) on the SFX track at the shot's cut start + "at", at "gain_db"."""
+    placed_until = -1
+    for c in clips:
+        shot = shots[c["id"]]
+        for entry in shot.get("sfx", []):
+            path = sfx_clip(film, root, shot, entry)
+            start = round((c["start"] + float(entry["at"])) * FPS)
+            if start < placed_until:
+                raise SystemExit(f"{c['id']}: SFX at {entry['at']}s overlaps the previous SFX clip")
+            (item,) = media.mp.AppendToTimeline([{"mediaPoolItem": media.get(path), "mediaType": 2,
+                                                  "trackIndex": sfx_track(film), "recordFrame": t0 + start}])
+            item.SetProperty("AudioVolume", float(entry.get("gain_db", 0.0)))
+            placed_until = start + item.GetDuration()
 
 
 def place_music(film: dict, root: Path, clips: list[dict], events: list[dict], media: Media, t0: int,
@@ -430,9 +462,8 @@ def place_music(film: dict, root: Path, clips: list[dict], events: list[dict], m
     """The score on A3 from film music "start", ducked by "duck_db" under narration and on-screen dialogue."""
     m = film["music"]
     path = music_clip(root, film, total / FPS)
-    # On-screen speech from each shot's vocal stem, cut off where the shot is trimmed ("out").
-    speech = [{"start": c["start"] + s, "end": c["start"] + min(t, c["end"] - c["start"])} for c in clips
-              if c["bed"] == "full" for s, t in dialogue_spans(c["video"]) if s < c["end"] - c["start"]]
+    # On-screen speech from each shot's vocal stem, only the part inside its "in"/"out" trim.
+    speech = [{"start": s, "end": t} for s, t, _ in cut_speech(clips)]
     a = round(float(m.get("start", 0.0)) * FPS)
     pieces = bed_pieces(a, min(total, a + int(duration(path) * FPS)), duck_windows(events + speech))
     gain = float(m.get("gain_db", -6.0))
@@ -561,7 +592,7 @@ def main() -> None:
     root = a.shotlist.parent
     clips, events = plan(film, root)
     for e in events:
-        e["clip"] = tts(film, root, e["text"], e["seed"], e["file"], e["voice"], e["tempo"])
+        e["clip"] = tts(film, root, e["text"], e["seed"], e["file"], e["voice"], e["tempo"], e["delivery"])
         e["end"] = e["start"] + duration(e["clip"])
     report(film, root, clips, events)
     resolve = connect()

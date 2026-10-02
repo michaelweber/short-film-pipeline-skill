@@ -1,14 +1,15 @@
 """Build a clean voice-reference wav for one speaker from a video (YouTube URL or local file).
 
-    python tools/voice_ref.py <video url> --out film/<name>/voices/guest.wav \
-        --start 0 --end 266 --keep "first phrase|second phrase"
+    python tools/voice_ref.py https://www.youtube.com/watch?v=XXXX --out film/x/voices/guest.wav \
+        --start 0 --end 266 --keep "thank you for having me|that is a great question"
     python tools/voice_ref.py src.mp4 --out voices/host.wav --use 1,3,4      # pick spans by index
 
 Steps: download audio (yt-dlp) -> trim [start, end] -> isolate vocals (Mel-Band RoFormer, via ComfyUI) ->
 split the vocal stem at silences (-35 dB, 0.3 s; spans >= 0.8 s) -> transcribe each span (Granite ASR) ->
 print "NN  start-end  score  text" (score = best word recall of any --keep phrase) and write every span to
 <out stem>_spans/NN.wav -> concatenate the selected spans (--use, else keep-score >= 0.6, else all), cap at
---max seconds, loudnorm to -20 LUFS, mono 48 kHz -> --out. ComfyUI must be running on :8188.
+--max seconds, loudnorm to -20 LUFS, mono 48 kHz -> --out. Separation and ASR run on the aux ComfyUI
+(speech_qa.transcribe -> h3_render.AUX_URL, env AUX_COMFY_URL, default :8189).
 Needs yt-dlp for URLs: python -m pip install yt-dlp
 """
 from __future__ import annotations

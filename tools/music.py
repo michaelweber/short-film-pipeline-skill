@@ -129,10 +129,20 @@ def main() -> None:
     print(f"\r+ {dest}  seed {seed}  {duration(dest):.1f}s  {report}  {vocal_check(dest)}")
 
 
+VOCAL_SILENT_LUFS = -50.0  # a vocal stem this quiet is separator residue; ASR on it hallucinates whole sentences
+
+
 def vocal_check(path: Path) -> str:
-    """ASR on the separated vocal stem (written next to the score): clean when at most 3 words are heard."""
-    heard = transcribe(path, path.with_name(path.stem + ".vocals.flac"))
-    return f"heard {heard!r}  " + ("vocals: clean" if len(words(heard)) <= 3 else f"!! vocals: {heard}")
+    """ASR on the separated vocal stem (written next to the score): clean when at most 3 words are heard, or when
+    the stem's integrated loudness is under VOCAL_SILENT_LUFS (ASR invents text on near-silence)."""
+    stem = path.with_name(path.stem + ".vocals.flac")
+    heard = transcribe(path, stem)
+    log = subprocess.run(["ffmpeg", "-nostats", "-i", str(stem), "-af", "ebur128", "-f", "null", "-"],
+                         capture_output=True, text=True).stderr
+    lufs = float(re.findall(r"I:\s+(-?[\d.]+) LUFS", log)[-1])
+    if lufs < VOCAL_SILENT_LUFS:
+        return f"vocals: clean (stem {lufs:.1f} LUFS)"
+    return f"heard {heard!r}  " + ("vocals: clean" if len(words(heard)) <= 3 else f"!! vocals ({lufs:.1f} LUFS): {heard}")
 
 
 if __name__ == "__main__":

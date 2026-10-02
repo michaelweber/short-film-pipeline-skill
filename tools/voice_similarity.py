@@ -1,8 +1,8 @@
 """Speaker similarity of vocal stems against a reference voice (WavLM x-vector cosine).
 
-Needs torch + transformers + librosa, so run it with ComfyUI's embedded Python:
-    <ComfyUI>/python_embeded/python.exe tools/voice_similarity.py \
-        film/<name>/voices/hero.wav film/<name>/renders/s04.vocals.flac ...
+Needs torch + transformers + librosa, so run it with ComfyUI's embedded Python (the py_torch setting):
+    $PY_TORCH tools/voice_similarity.py \
+        film/<name>/voices/kid.wav film/<name>/renders/s04.vocals.flac ...
 Stems come from tools/speech_qa.py (renders/<id>.vocals.flac). Rough guide: same speaker is usually
 > 0.90, a clearly different voice < 0.80. Stems with several speakers score lower.
 """
