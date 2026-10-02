@@ -24,9 +24,9 @@ shots.json additions:
                                                 #  dramatic tone" (a "slow" delivery gets a longer take)
   "narration_delivery": "..."                   # default tone for every line (unset: an earnest, intimate
                                                 #  documentary-narrator tone at a natural pace)
-  "narration_tempo": 1.15                       # speed factor for the finished clips (default 1.0). Comfy engines
-                                                #  and h3: ffmpeg atempo (pitch kept), cached as <hash>_x<tempo>.wav;
-                                                #  audio.cpp engines: the model's own speed control (new take)
+  "narration_tempo": 1.15                       # speed factor for the finished clips (default 1.0): an ffmpeg
+                                                #  atempo copy (pitch kept), cached as <hash>_x<tempo>.wav; NATIVE_SPEED
+                                                #  engines (omnivoice) generate the take at that speed instead
   "narration_isolate": true                     # keep only the voice of each clip (Mel-Band RoFormer vocal stem;
                                                 #  VibeVoice sometimes adds a music bed); cached as <hash>_iso.wav
   shot "bed": "instruments"                     # use the shot's H3 audio with vocals removed (for shots whose
@@ -37,9 +37,9 @@ narrator reading it into a studio microphone, with the voice clip as <Audio 1>; 
 Length is 1 s + words / 2.6 (min 5 s). H3 pads a line with invented words, so each take is cut to the scripted
 line at its pauses (split_take: ASR on candidate spans); the raw take stays as <hash>.take.flac.
 A line's "file" (e.g. a piece cut from a longer take, see split_take) is used as-is instead of any engine.
-Engine "omnivoice" (AUDIOCPP_ENGINES): a local audio.cpp CLI take (setting "audiocpp_dir"; the aux card), cloned from
-the voice clip and its "ref_text". It is cut to the line like an H3 take: the clone sometimes runs on with words from
-the reference transcript. "delivery" is not used (no tone control on the clone route).
+Engines "omnivoice", "vibevoice7b" (AUDIOCPP_ENGINES): a local audio.cpp CLI take (setting "audiocpp_dir"; the aux
+card), cloned from the voice clip (OmniVoice also uses its "ref_text"). It is cut to the line like an H3 take: the clone
+sometimes runs on (OmniVoice: with words from the reference transcript). "delivery" is not used (no tone control).
 The report flags lines that overlap each other, run far into the next shot, or sit on top of on-screen
 dialogue (speech spans from the vocal stem speech_qa.py writes; shots on the instrumental bed are skipped).
 """
@@ -90,9 +90,19 @@ ENGINES = {
 }
 
 # Engines run through the audio.cpp CLI (setting "audiocpp_dir": the release folder with audiocpp_cli and models/)
-# instead of a Comfy graph: family -> model dir. Their takes are cut to the line like H3's, and "tempo" is passed as
-# the model's speed option rather than an atempo copy (time-stretching adds its own artifacts).
-AUDIOCPP_ENGINES = {"omnivoice": "models/OmniVoice"}
+# instead of a Comfy graph: name -> CLI arguments for one take (text, absolute reference path, voice entry). Their
+# takes are cut to the line like H3's. NATIVE_SPEED engines take "tempo" as the model's speed option (a new take)
+# rather than an atempo copy (time-stretching adds its own artifacts); the others get the atempo copy.
+AUDIOCPP_ENGINES = {
+    "omnivoice": lambda text, ref, voice: [
+        "--family", "omnivoice", "--model", "models/OmniVoice", "--text", text, "--voice-ref", ref,
+        *(["--reference-text", voice["ref_text"]] if voice.get("ref_text") else [])],
+    # VibeVoice 7B (Q8 GGUF): a one-speaker script cloned from voice_samples; 20 diffusion steps like the Comfy engine
+    "vibevoice7b": lambda text, ref, voice: [
+        "--family", "vibevoice", "--model", "models/VibeVoice-7B", "--text", f"Speaker 1: {text}",
+        "--request-option", f"voice_samples={ref}", "--num-inference-steps", "20"],
+}
+NATIVE_SPEED = {"omnivoice"}
 CUT_ENGINES = {"h3", *AUDIOCPP_ENGINES}
 
 
@@ -101,11 +111,9 @@ def _audiocpp_take(engine: str, text: str, ref: Path, voice: dict, seed: int, sp
     base = Path(setting("audiocpp_dir", "audio.cpp"))
     wav = dest.resolve().with_suffix(".gen.wav")  # the CLI runs in `base`: every path it gets is absolute
     cmd = [str(base / ("audiocpp_cli.exe" if os.name == "nt" else "audiocpp_cli")), "--task", "tts",
-           "--backend", "cuda", "--device", "0", "--family", engine, "--model", str(base / AUDIOCPP_ENGINES[engine]),
-           "--voice-ref", str(ref.resolve()), "--seed", str(seed), "--text", text, "--out", str(wav)]
-    if voice.get("ref_text"):
-        cmd += ["--reference-text", voice["ref_text"]]
-    if speed != 1.0:
+           "--backend", "cuda", "--device", "0", *AUDIOCPP_ENGINES[engine](text, str(ref.resolve()), voice),
+           "--seed", str(seed), "--out", str(wav)]
+    if speed != 1.0 and engine in NATIVE_SPEED:
         cmd += ["--request-option", f"speed={speed:g}"]
     env = dict(os.environ)
     if setting("aux_gpu_uuid"):
@@ -234,7 +242,7 @@ def clip_path(film: dict, root: Path, text: str, seed: int | None = None, file: 
         delivery = delivery or film.get("narration_delivery")
         if delivery:  # a line's "delivery" (tone) or the film's "narration_delivery"; unset keeps the default's names
             extra.append(["delivery", delivery])
-    native_speed = engine in AUDIOCPP_ENGINES
+    native_speed = engine in NATIVE_SPEED
     if native_speed and tempo != 1.0:
         extra.append(["speed", round(tempo, 3)])  # the take itself is generated at this speed
 
@@ -287,7 +295,7 @@ def tts(film: dict, root: Path, text: str, seed: int | None = None, file: str | 
         if not iso.exists():
             isolate_voice(clip, iso)
         clip = iso
-    if tempo != 1.0 and film.get("narration_engine", "vibevoice") not in AUDIOCPP_ENGINES:
+    if tempo != 1.0 and film.get("narration_engine", "vibevoice") not in NATIVE_SPEED:
         # Sped-up copy (pitch kept); the slower clips stay cached beside it.
         subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(clip), "-af", f"atempo={tempo}", str(dest)],
                        check=True)
