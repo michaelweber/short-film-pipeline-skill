@@ -11,6 +11,7 @@ Resolution order for a key: the environment variable KEY.upper() (e.g. PY_TORCH)
   gpu_lease_dir           directory for the cross-process GPU/CPU leases (tools/gpu_queue.py)
   resolve_project_prefix  prefix of every Resolve project name (a film's own "project_prefix" wins)
   resolve_script_lib      path of DaVinci Resolve's fusionscript.dll / .so
+  audiocpp_dir            audio.cpp release folder (audiocpp_cli + models/): narrate.py's audio.cpp engines
 
 Example tools/local_settings.json:
   {"py_torch": "C:/ComfyUI_windows_portable/python_embeded/python.exe",

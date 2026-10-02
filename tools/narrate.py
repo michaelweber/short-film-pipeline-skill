@@ -8,7 +8,7 @@ plan/tts/report functions here.
 
 shots.json additions:
   "narration_voice": "narrator"                 # key into "voices" ({desc, audio, ref_text?})
-  "narration_engine": "vibevoice"               # see ENGINES below, or "h3" (below)
+  "narration_engine": "vibevoice"               # see ENGINES and AUDIOCPP_ENGINES below, or "h3" (below)
   "narration_subject": "host"                   # h3 only (optional): key into "subjects"; the narrator is staged on
                                                 #  camera with these photos (only the audio is kept)
   "narration_ducking_db": -14                   # how far the shot audio dips under the voice (resolve_edit.py)
@@ -24,8 +24,9 @@ shots.json additions:
                                                 #  dramatic tone" (a "slow" delivery gets a longer take)
   "narration_delivery": "..."                   # default tone for every line (unset: an earnest, intimate
                                                 #  documentary-narrator tone at a natural pace)
-  "narration_tempo": 1.15                       # speed factor for the finished clips (ffmpeg atempo, pitch kept;
-                                                #  default 1.0); a sped-up clip is cached as <hash>_x<tempo>.wav
+  "narration_tempo": 1.15                       # speed factor for the finished clips (default 1.0). Comfy engines
+                                                #  and h3: ffmpeg atempo (pitch kept), cached as <hash>_x<tempo>.wav;
+                                                #  audio.cpp engines: the model's own speed control (new take)
   "narration_isolate": true                     # keep only the voice of each clip (Mel-Band RoFormer vocal stem;
                                                 #  VibeVoice sometimes adds a music bed); cached as <hash>_iso.wav
   shot "bed": "instruments"                     # use the shot's H3 audio with vocals removed (for shots whose
@@ -36,6 +37,9 @@ narrator reading it into a studio microphone, with the voice clip as <Audio 1>; 
 Length is 1 s + words / 2.6 (min 5 s). H3 pads a line with invented words, so each take is cut to the scripted
 line at its pauses (split_take: ASR on candidate spans); the raw take stays as <hash>.take.flac.
 A line's "file" (e.g. a piece cut from a longer take, see split_take) is used as-is instead of any engine.
+Engine "omnivoice" (AUDIOCPP_ENGINES): a local audio.cpp CLI take (setting "audiocpp_dir"; the aux card), cloned from
+the voice clip and its "ref_text". It is cut to the line like an H3 take: the clone sometimes runs on with words from
+the reference transcript. "delivery" is not used (no tone control on the clone route).
 The report flags lines that overlap each other, run far into the next shot, or sit on top of on-screen
 dialogue (speech spans from the vocal stem speech_qa.py writes; shots on the instrumental bed are skipped).
 """
@@ -84,6 +88,33 @@ ENGINES = {
         "do_sample": True, "length_penalty": 0.0, "num_beams": 3, "repetition_penalty": 10.0,
         "max_mel_tokens": 1500, "use_fp16": True, "use_deepspeed": False}),
 }
+
+# Engines run through the audio.cpp CLI (setting "audiocpp_dir": the release folder with audiocpp_cli and models/)
+# instead of a Comfy graph: family -> model dir. Their takes are cut to the line like H3's, and "tempo" is passed as
+# the model's speed option rather than an atempo copy (time-stretching adds its own artifacts).
+AUDIOCPP_ENGINES = {"omnivoice": "models/OmniVoice"}
+CUT_ENGINES = {"h3", *AUDIOCPP_ENGINES}
+
+
+def _audiocpp_take(engine: str, text: str, ref: Path, voice: dict, seed: int, speed: float, dest: Path) -> None:
+    """One audio.cpp take of `text` cloned from `ref` (+ its "ref_text") on the aux card, saved as `dest` (.flac)."""
+    base = Path(setting("audiocpp_dir", "audio.cpp"))
+    wav = dest.resolve().with_suffix(".gen.wav")  # the CLI runs in `base`: every path it gets is absolute
+    cmd = [str(base / ("audiocpp_cli.exe" if os.name == "nt" else "audiocpp_cli")), "--task", "tts",
+           "--backend", "cuda", "--device", "0", "--family", engine, "--model", str(base / AUDIOCPP_ENGINES[engine]),
+           "--voice-ref", str(ref.resolve()), "--seed", str(seed), "--text", text, "--out", str(wav)]
+    if voice.get("ref_text"):
+        cmd += ["--reference-text", voice["ref_text"]]
+    if speed != 1.0:
+        cmd += ["--request-option", f"speed={speed:g}"]
+    env = dict(os.environ)
+    if setting("aux_gpu_uuid"):
+        env["CUDA_VISIBLE_DEVICES"] = setting("aux_gpu_uuid")  # device 0 = the aux card
+    r = subprocess.run(cmd, cwd=base, env=env, capture_output=True, text=True)
+    if r.returncode or not wav.exists():
+        raise RuntimeError(f"{engine} take failed ({r.returncode}): {(r.stderr or r.stdout)[-1500:]}")
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(wav), str(dest)], check=True)
+    wav.unlink()
 
 
 H3_VO_SCENE = ("A quiet voice-over recording booth with dark acoustic foam walls and a warm desk lamp. {who} sits at a "
@@ -186,7 +217,8 @@ def duration(path: Path) -> float:
 def clip_path(film: dict, root: Path, text: str, seed: int | None = None, file: str | None = None,
               voice: str | None = None, tempo: float = 1.0, raw: bool = False, delivery: str | None = None) -> Path:
     """Where the line's clip lives: the line's own "file" if set, else the engine's cache path. The engine's clip is
-    <hash>.wav (`raw`); "narration_isolate" derives <hash>_iso.wav from it, a tempo other than 1 <...>_x<tempo>.wav."""
+    <hash>.wav (`raw`); "narration_isolate" derives <hash>_iso.wav from it, a tempo other than 1 <...>_x<tempo>.wav
+    (audio.cpp engines generate at the tempo instead: it is part of <hash>)."""
     if file:
         return root / file
     voice_key = voice or film["narration_voice"]
@@ -202,6 +234,10 @@ def clip_path(film: dict, root: Path, text: str, seed: int | None = None, file: 
         delivery = delivery or film.get("narration_delivery")
         if delivery:  # a line's "delivery" (tone) or the film's "narration_delivery"; unset keeps the default's names
             extra.append(["delivery", delivery])
+    native_speed = engine in AUDIOCPP_ENGINES
+    if native_speed and tempo != 1.0:
+        extra.append(["speed", round(tempo, 3)])  # the take itself is generated at this speed
+
     def cached(parts: list) -> Path:
         key = hashlib.sha1(json.dumps([text, engine, seed, hashlib.sha1(ref.read_bytes()).hexdigest(), *parts])
                            .encode())
@@ -216,7 +252,7 @@ def clip_path(film: dict, root: Path, text: str, seed: int | None = None, file: 
         return path
     if film.get("narration_isolate"):
         path = path.with_name(f"{path.stem}_iso.wav")
-    return path if tempo == 1.0 else path.with_name(f"{path.stem}_x{tempo:g}.wav")
+    return path if tempo == 1.0 or native_speed else path.with_name(f"{path.stem}_x{tempo:g}.wav")
 
 
 def dialogue_spans(video: Path) -> list[tuple[float, float]]:
@@ -242,7 +278,7 @@ def tts(film: dict, root: Path, text: str, seed: int | None = None, file: str | 
         if not dest.exists():
             raise SystemExit(f"missing narration file {dest}")
         return dest
-    clip = _engine_clip(film, root, text, seed, voice, delivery)  # cached; re-cuts (dropping derived copies) if stale
+    clip = _engine_clip(film, root, text, seed, voice, delivery, tempo)  # cached; re-cuts (dropping derived) if stale
     dest = clip_path(film, root, text, seed, None, voice, tempo, delivery=delivery)
     if dest.exists():
         return dest
@@ -251,7 +287,7 @@ def tts(film: dict, root: Path, text: str, seed: int | None = None, file: str | 
         if not iso.exists():
             isolate_voice(clip, iso)
         clip = iso
-    if tempo != 1.0:
+    if tempo != 1.0 and film.get("narration_engine", "vibevoice") not in AUDIOCPP_ENGINES:
         # Sped-up copy (pitch kept); the slower clips stay cached beside it.
         subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(clip), "-af", f"atempo={tempo}", str(dest)],
                        check=True)
@@ -275,15 +311,15 @@ def cut_info(clip: Path) -> dict:
 
 
 def _engine_clip(film: dict, root: Path, text: str, seed: int | None, voice_key: str | None,
-                 delivery: str | None = None) -> Path:
+                 delivery: str | None = None, tempo: float = 1.0) -> Path:
     voice = film["voices"][voice_key or film["narration_voice"]]
     engine = film.get("narration_engine", "vibevoice")
     ref = root / voice["audio"]
     seed = film.get("narration_seed", 42) if seed is None else seed
-    dest = clip_path(film, root, text, seed, None, voice_key, raw=True, delivery=delivery)
+    dest = clip_path(film, root, text, seed, None, voice_key, tempo, raw=True, delivery=delivery)
     take = dest.with_suffix(".take.flac")
     marker = dest.with_suffix(".cutv")  # {"v": CUT_VERSION, "end_db": take level just inside the cut end}
-    stale_cut = engine == "h3" and take.exists() and cut_info(dest).get("v") != CUT_VERSION
+    stale_cut = engine in CUT_ENGINES and take.exists() and cut_info(dest).get("v") != CUT_VERSION
     if dest.exists() and not stale_cut:
         return dest
     for derived in dest.parent.glob(f"{dest.stem}_*.wav"):  # tempo/isolated copies of an old cut
@@ -291,13 +327,15 @@ def _engine_clip(film: dict, root: Path, text: str, seed: int | None, voice_key:
     dest.parent.mkdir(exist_ok=True)
     prefix = f"h3film/{root.name}/narration/{dest.stem}"
     flac = dest.with_suffix(".flac")
-    if engine == "h3":
+    if engine in CUT_ENGINES:
         # The raw take is kept (<hash>.take.flac), so re-trimming never re-renders it; a clip cut by an older
         # cutter (CUT_VERSION) is re-cut from it.
-        if not take.exists():
+        if not take.exists() and engine == "h3":
             small = bool(film.get("narration_h3_short_side"))
             g = _h3_vo(film, root, [text], seed, prefix, voice_key, delivery)
             fetch_audio(run_graph(g, f"h3 {text[:30]}", H3_URL, front=small), take, H3_URL)
+        elif not take.exists():
+            _audiocpp_take(engine, text, ref, voice, seed, tempo, take)
         a, b = split_take(take, [text])[0]
         cut(take, a, b, flac)
         lv = _levels(take)

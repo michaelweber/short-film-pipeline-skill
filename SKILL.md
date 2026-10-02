@@ -157,6 +157,15 @@ After 3 unsuccessful re-rolls report the unresolved issue and repair/restage it;
   got an invented extra item mid-line on 18 of 18 seeds (two ways of splitting it); one line per item passed on
   the first seed. When a line fails the same way on every seed, rewrite or split it instead of re-rolling.
   Multi-line shots need per-line timing edits (key them per line, e.g. `vo_at_<i>`/`vo_tempo_<i>`).
+- **Prefer `"narration_engine": "omnivoice"`** (audio.cpp CLI on the aux card, setting `audiocpp_dir`; release zip +
+  `omnivoice-bf16.gguf` in `models/OmniVoice`) over H3 for narration. The user heard H3 VO as slightly
+  "time-stretched"; it was in the takes themselves (mono clips, 66/73 at tempo 1). On 73 gated lines OmniVoice scored
+  SQUIM PESQ 3.85 vs 2.51, SI-SDR 24 vs 12 dB, speaker sim 0.95 vs 0.94, ~4 s per take. VibeVoice 7B (audio.cpp)
+  was in between (PESQ 2.9) and less faithful to the voice. OmniVoice has no tone control on the clone route
+  (`delivery` is ignored), so read solemn/hushed lines before keeping it. Its failures are reordered sentences,
+  dropped words, and runs into the reference transcript ("…in a big, bad way"); the take cutter + `check_clip` gate
+  handle them, and ~5% of lines need 12–40 seeds. Tempo is the model's own speed option (a new take, gated
+  again), so refit the timing → re-gate → refit until the tempos stop changing.
 - H3 narration takes: set film `"narration_h3_short_side": 256`. Only the take's audio is kept, so its picture is
   denoised at 448×256: 11–20 s per take instead of 3–7 min at 1344×768, and small takes jump the H3 queue.
   Lines that already have a full-size take keep it. H3 takes need the H3 card (not the aux card).
