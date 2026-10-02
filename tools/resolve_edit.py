@@ -311,7 +311,8 @@ def music_clip(root: Path, film: dict, total_s: float) -> Path:
     length = round(min(duration(src) - cue, total_s - start), 3)
     if length <= 1.5:
         raise SystemExit(f"music: only {length}s of score left after in={cue}, start={start}")
-    out = root / "edit" / "music" / f"{src.stem}_{cue}_{length}.wav"
+    digest = hashlib.sha1(src.read_bytes()).hexdigest()[:10]  # a re-assembled score keeps its name and length
+    out = root / "edit" / "music" / f"{src.stem}_{digest}_{cue}_{length}.wav"
     if not out.exists():
         out.parent.mkdir(parents=True, exist_ok=True)
         fades = f"afade=t=out:st={length - 1.5}:d=1.5" + (",afade=t=in:d=1" if cue > 0 else "")

@@ -211,6 +211,25 @@ After 3 unsuccessful re-rolls report the unresolved issue and repair/restage it;
 - Sound effects make a doc parody land. Prompt a render's `audio` for its effect (explosion, engine whine,
   clicking drive) and keep it with `"bed": "full"` (CLAP-check first); add others with shot `"sfx"` entries
   (`tools/sfx.py --audition 3`: audio-only H3 takes of the shot's subjects doing the action, CLAP picks).
+- **Skeleton → Suno cover** (user's own logged-in Suno, driven in their browser; never a third-party Suno API):
+  render a local cue shaped to the script curve, upload it as an audio condition, set it to Cover, lyrics exactly
+  `[Instrumental]`, **Audio Influence ≥ 80%**, duration = segment length, no vocal gender, exclude vocals/choir.
+  At 85% the cover held the skeleton's timing within ~2 s (DTW on chroma) but flattened its dynamics (curve
+  r 0.74 → −0.34) and inserted its own breakdown before the finale. Fix in post: splice the stray section out
+  on whole bars, then re-apply the curve gain (`score_shape`); this got r back to 0.68. Each unlocked song costs
+  one plan download (all formats). The CDN stream is obfuscated: use the Download menu or a share-link
+  downloader the user supplies, never extract it from the player. WAV export arrives late or not at all; the MP3
+  is fine for a bed. UI: after the upload's Continue an "Overwrite Lyrics & Styles?" / "Overwrite Styles?"
+  prompt can appear late; set styles, then answer Keep Current, and verify Cover + `[Instrumental]` + Audio
+  Influence before Create. Collect each take's Share → Copy Link (`suno.com/s/…`; on a song page the first
+  "More options" belongs to the "Cover of" card, whose link is the skeleton's).
+- Pick between takes on cut-in ease, not taste alone: vocal gate (`music.vocal_check`; even with vocals excluded
+  2 of 10 covers failed it), lead-in, dropouts, and a natural ending at segment + 2 s overlap. Chroma-DTW drift
+  against the skeleton only means something when the skeleton is script-shaped and harmonic; on a looped or
+  drone skeleton it reports 80–150 s of nonsense. Match each kept take to the old cue's loudness so the mix holds
+  (Suno masters up to 13 dB hotter), pad it to the used length, and listen before calling it done.
+- After any score change, confirm it reached the export: compare a window of the new and previous cut's audio
+  (md5 of decoded PCM). A trim cache keyed by name and length silently replayed an old score across re-cuts.
 
 ## 8. Cut
 - `python tools/resolve_edit.py film/<name>/shots.json` (Resolve Studio running, External scripting = Local).
