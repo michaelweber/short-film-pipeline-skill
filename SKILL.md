@@ -239,8 +239,8 @@ After 3 unsuccessful re-rolls report the unresolved issue and repair/restage it;
 - Pick between takes on cut-in ease, not taste alone: vocal gate (`music.vocal_check`; even with vocals excluded
   2 of 10 covers failed it), lead-in, dropouts, and a natural ending at segment + 2 s overlap. Chroma-DTW drift
   against the skeleton only means something when the skeleton is script-shaped and harmonic; on a looped or
-  drone skeleton it reports 80–150 s of nonsense. Match each kept take to the old cue's loudness so the mix holds
-  (Suno masters up to 13 dB hotter), pad it to the used length, and listen before calling it done.
+  drone skeleton it reports 80–150 s of nonsense. Normalise each kept take to the bed level (−15.5 LUFS here:
+  matching the old cue copied a −28.7 LUFS YuE render and buried the cue), pad it to the used length, and listen.
 - After any score change, confirm it reached the export: compare a window of the new and previous cut's audio
   (md5 of decoded PCM). A trim cache keyed by name and length silently replayed an old score across re-cuts.
 
@@ -285,6 +285,11 @@ After 3 unsuccessful re-rolls report the unresolved issue and repair/restage it;
   video/audio timestamps and final sample extent after mastering; bound audio to the cut without truncating
   approved speech. Measure the decoded final delivery's loudness/true peak after AAC, not only the PCM master.
   Encoding can overshoot the limiter ceiling; allow headroom and remeasure instead of trusting settings.
+- **Never reach loudness by turning the timeline up.** Raising every Resolve item to hit −14 LUFS clipped the
+  24-bit master in 457 of 1010 s; the delivery limiter only hid it, and the user heard the voices go "WAY better"
+  once the master was clean. The master stays below −0.5 dBFS (`resolve_edit.py` lowers items while it clips and
+  stops if it still does); loudness comes from the delivery encode's float make-up gain ahead of its limiter.
+  Check `qa.md`'s master-clipping gate whenever a mix sounds harsh or dull, before blaming the voice engine.
 - Finish with a whole-film consistency sweep (`sheet.py --cols 5`), actual exported-frame inspection and
   full exported playback. Apply `qa.md`'s sequence palette and mix gates; report what remains broken or
   unverified rather than treating ASR, meters or a successful export as approval.

@@ -23,6 +23,7 @@ H3-cache or rig checks. All deliveries require continuity, pacing, speech/mix an
 | Cache | `python tools/h3_render.py film/<f>/shots.json --dry-run` | 0 stale (every line `= … up to date`) | render the stale shots |
 | Titles | frame grab at every title's `at + 1 s` in the cut (`ffmpeg -ss <t> -i <f>.mp4 -frames:v 1 …`) | no badge or lower third over a face; the right text | `"align": "left"` on the rank badge |
 | Delivery loudness | `ffmpeg -nostats -i film/<f>/<f>.mp4 -af ebur128=peak=true -f null -` | within ±0.5 LU of `loudness_lufs`, true peak ≤ −1 dBTP | rerun `resolve_edit.py` |
+| Master clipping | `ffmpeg -i film/<f>/edit/<f>_master.mov -map 0:a:0 -af volumedetect -f null -` (`resolve_edit.py` stops on it) | `max_volume` < −0.5 dB: the 24-bit master clamps overs, and no delivery limiter undoes that distortion | lower the hot track(s) in the timeline; never reach loudness by raising timeline gain (the delivery encode's make-up gain does that) |
 | Delivery size | `ffprobe` the mp4 | fits the destination (YouTube: `"crf": 23`, ~60 MB for 4 min at 1344×768) | set film `"crf"`, re-deliver |
 
 Checking frames at scale: use one ffmpeg call per shot (`-vf "fps=4,crop=…,scale=-2:100,tile=Nx1"`), not a

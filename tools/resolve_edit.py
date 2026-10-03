@@ -96,7 +96,8 @@ XFADE = 6                                    # frames per ducking ramp (0 dB aud
 MIN_SEG = 2 * XFADE                          # shorter bed pieces are folded into their neighbour
 NARRATION_GAIN_DB = 4.0                      # clips are normalised to -20 LUFS at TTS time; sit them above the bed
 LOUDNESS_PASSES = 8                          # audio-only test encodes to land the delivery on "loudness_lufs"
-HEADROOM_RENDERS = 3                         # master renders, lowering every item 6 dB while the master clips
+HEADROOM_RENDERS = 3                         # master renders, lowering every item 6 dB while the master clips; still
+                                             # clipping after the last one stops the run before any delivery
 
 
 def connect():
@@ -646,8 +647,11 @@ def main() -> None:
     for attempt in range(HEADROOM_RENDERS):
         master = render_master(project, edit_dir, root.name)
         head = sample_peak(master)
-        if head < -0.5 or attempt == HEADROOM_RENDERS - 1:
+        if head < -0.5:
             break
+        if attempt == HEADROOM_RENDERS - 1:
+            raise SystemExit(f"master still clips ({head:+.1f} dBFS) after {total:+.0f} dB on every item: not delivered "
+                             "(a clipped master is distortion no limiter undoes; find the hot track)")
         for item in audio_items(tl):
             item.SetProperty("AudioVolume", float(item.GetProperty("AudioVolume")) - 6.0)
         resolve.GetProjectManager().SaveProject()
@@ -668,7 +672,6 @@ def main() -> None:
     lufs, peak = loudness(out)
     warn = "  !! true peak above -1 dBTP" if peak > -1.0 else ""
     warn += f"  !! {lufs:.1f} LUFS, target {target}" if abs(target - lufs) > 0.5 else ""
-    warn += f"  !! master clips ({head:+.1f} dBFS)" if head >= -0.5 else ""
     print(f"rendered -> {out}  ({duration(out):.1f}s, {lufs:.1f} LUFS, true peak {peak:.1f} dBTP, master peak "
           f"{head:.1f} dBFS, item shift {total:+.1f} dB, delivery gain {gain:+.1f} dB, limiter {ceiling:.1f} dBFS; "
           f"master {master.name}){warn}")
