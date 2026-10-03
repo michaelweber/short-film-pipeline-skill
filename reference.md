@@ -134,9 +134,10 @@ Voice-over is generated separately rather than by H3, so the narrator sounds the
   - Ducking lives on the timeline: A1 is split around each narration line (0.15 s lead, 0.25 s tail, gaps under
     0.35 s bridged). The pieces under the voice sit at `narration_ducking_db`, joined by 6-frame "Cross Fade 0 dB"
     transitions. It's editable in Resolve like any hand-made duck.
-  - Loudness: render and deliver, measure the delivered `<film>.mp4` with ffmpeg `ebur128`, shift every audio item
-    by the error to `loudness_lufs` (-16), and repeat (up to 4 passes) until within 0.3 LU. Measuring after the
-    delivery limiter matters: one shift measured on the master landed 0.7 LU short at -14 LUFS.
+  - Loudness: Resolve renders the master at the timeline's levels; while its sample peak is above -0.5 dBFS every
+    audio item drops 6 dB and it renders again (the 24-bit master clamps overs, and no later limiter undoes that).
+    The delivery encode then adds the make-up gain to `loudness_lufs` (-16) ahead of its limiter, found on
+    audio-only test encodes until within 0.3 LU. Raising every item instead clipped 457 of 1010 s of one master.
   - Resolve renders `edit/<film>_master.mov` (H.264 + 24-bit PCM). ffmpeg then encodes `<film>.mp4`: x264 at
     CRF 16 (film-level `"crf"` overrides it; 23 halves the file), and AAC through a -2 dBFS limiter run at 4x
     oversampling (true peak stays under -1 dBTP).
@@ -144,9 +145,10 @@ Voice-over is generated separately rather than by H3, so the narrator sounds the
     - Fairlight's master limiter has no API.
     - The 21.1 API rejects every `VideoQuality` value, so Resolve's H.264 can't be capped (it comes out at ~14 Mbps).
   - The previous `<film>.mp4` is kept as `_iterN.mp4`. The cut list is exported to `edit/<timeline>.otio`.
-  - Film `"mono_mix": true` delivers dual mono (both channels = (L + R) / 2) through the same limiter and loudness
-    loop; the timeline and master stay stereo. Generated speech carries a slight stereo spread (H3 shot audio:
-    L/R correlation ~0.95, side 15–18 dB under mid) that a listener may hear as a phasey voice.
+  - Film `"mono_dialogue": true` lays the A1 audio of shots with on-screen speech (shot `"voices"`) as a mono fold
+    (both channels = (L + R) / 2, cached in `edit/mono/`); music, audio cues, SFX and other shots stay stereo.
+    Generated speech carries a slight stereo spread (H3 shot audio: L/R correlation ~0.95, side 15–18 dB under
+    mid) that a listener may hear as a phasey voice. Narration is already mono (its own mono track).
   - Media is imported from content-addressed copies in `edit/media/`. Resolve doesn't notice a file rewritten in
     place, and `ReplaceClip` on the same path keeps the stale frames.
 - Clips are cached in `<film>/narration/`.

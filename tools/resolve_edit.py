@@ -52,11 +52,13 @@ Pre-made footage (a channel intro) comes in as an h3_render.py "clip" shot and i
 photographs as "still" shots, with any Ken Burns move ("kenburns") rendered into the shot by h3_render.py.
 Ducking is done on the timeline, not baked into files: A1 is split around every narration line, the pieces
 under the voice drop to "narration_ducking_db" (-14), and 0 dB audio cross fades make the ramps. It all stays
-editable in Resolve. Loudness: render and deliver, measure the delivered file with ffmpeg ebur128, shift every
-audio item by the difference to "loudness_lufs" (-16), repeat (up to LOUDNESS_PASSES) until within 0.3 LU; the
-delivery limiter shaves loudness off the peaks, so one shift measured on the master lands short. A previous
-<film>.mp4 is kept as <film>_iterN.mp4. Film "mono_mix": true delivers dual mono (L = R = (L + R) / 2): the timeline and
-master stay stereo; it drops the slight stereo spread of generated speech (H3 shot audio: L/R correlation ~0.95).
+editable in Resolve. Loudness: Resolve renders the master at the timeline's levels (every item lowered by 6 dB and
+re-rendered while its sample peak is above -0.5 dBFS: the 24-bit master clamps overs, which no later limiter undoes),
+and the delivery encode adds the make-up gain to "loudness_lufs" (-16) ahead of its limiter, measured on audio-only
+test encodes until within 0.3 LU. Raising every item instead clipped 457 of 1010 s of one master. A previous
+<film>.mp4 is kept as <film>_iterN.mp4. Film "mono_dialogue": true lays the A1 audio of shots with on-screen speech
+(shot "voices") as a mono fold ((L + R) / 2 on both channels; generated speech has a slight stereo spread, H3 shot
+audio L/R correlation ~0.95); music, audio cues, SFX and other shots stay stereo.
 
 Resolve references media by path and does not notice a file rewritten in place, so every clip is imported
 from a content-addressed copy, edit/media/<name>.<sha1[:10]><ext>. A re-rendered shot or re-rolled narration
@@ -93,8 +95,8 @@ LEAD_S, TAIL_S, HOLD_S = 0.15, 0.25, 0.35   # duck ahead of the first word, rele
 XFADE = 6                                    # frames per ducking ramp (0 dB audio cross fade, centred on the cut)
 MIN_SEG = 2 * XFADE                          # shorter bed pieces are folded into their neighbour
 NARRATION_GAIN_DB = 4.0                      # clips are normalised to -20 LUFS at TTS time; sit them above the bed
-LOUDNESS_PASSES = 6                          # render/measure/shift rounds to land the delivery on "loudness_lufs"
-                                             # (4 left an episode-length cut at -14.7: SFX peaks pull the limiter down)
+LOUDNESS_PASSES = 8                          # audio-only test encodes to land the delivery on "loudness_lufs"
+HEADROOM_RENDERS = 3                         # master renders, lowering every item 6 dB while the master clips
 
 
 def connect():
@@ -334,6 +336,17 @@ def duck_windows(events: list[dict]) -> list[tuple[float, float]]:
     return [(s, t) for s, t in merged]
 
 
+def mono_fold(root: Path, src: Path) -> Path:
+    """`src`'s audio with both channels = (L + R) / 2, cached by content in edit/mono/."""
+    out = root / "edit" / "mono" / f"{src.stem}_{hashlib.sha1(src.read_bytes()).hexdigest()[:10]}.wav"
+    if not out.exists():
+        out.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(src), "-vn", "-af",
+                        "pan=stereo|c0=0.5*c0+0.5*c1|c1=0.5*c0+0.5*c1", "-ar", "48000", "-c:a", "pcm_s24le", str(out)],
+                       check=True)
+    return out
+
+
 def bed_pieces(a: int, b: int, windows: list[tuple[float, float]]) -> list[tuple[int, int, bool]]:
     """Split shot frames [a, b) into (start, end, ducked) runs; runs shorter than MIN_SEG join the ducked side."""
     marks = [False] * (b - a)
@@ -416,6 +429,8 @@ def build(project, film: dict, root: Path, clips: list[dict], events: list[dict]
         items = []
         if c["bed"] != "none":
             bed_path = instruments_stem(c["video"]) if c["bed"] == "instruments" else c["video"]
+            if film.get("mono_dialogue") and shot.get("voices"):
+                bed_path = mono_fold(root, bed_path)
             bed = media.get(bed_path)
             usable = min(n, int(duration(bed_path) * FPS) - head)
             pieces = bed_pieces(frame, frame + usable, windows)
@@ -556,18 +571,26 @@ def render_master(project, edit_dir: Path, name: str) -> Path:
     return edit_dir / f"{name}_master.mov"
 
 
-def deliver(master: Path, out: Path, crf: int = 16, ceiling_db: float = -2.0, mono: bool = False) -> None:
+def deliver(master: Path, out: Path, crf: int = 16, ceiling_db: float = -2.0, gain_db: float = 0.0,
+            video: bool = True) -> None:
     """x264 at `crf` (film "crf", default 16; Resolve's API rejects every VideoQuality value, so its H.264 comes out
-    at ~14 Mbps) and AAC through a peak limiter at `ceiling_db` dBFS (Fairlight's master limiter has no API). The
-    limiter runs at 4x oversampling so it catches inter-sample peaks: at -14 LUFS a 48 kHz limiter still left
-    -0.4 dBTP after the AAC encode. main() lowers the ceiling when the encode still overshoots -1 dBTP. `mono` folds
-    the mix to identical channels first (film "mono_mix")."""
-    fold = "pan=stereo|c0=0.5*c0+0.5*c1|c1=0.5*c0+0.5*c1," if mono else ""
-    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(master), "-map", "0:v:0", "-map", "0:a:0",
-                    "-c:v", "libx264", "-crf", str(crf), "-preset", "slow", "-pix_fmt", "yuv420p",
-                    "-af", f"{fold}aresample=192000,alimiter=limit={10 ** (ceiling_db / 20):.4f}:attack=2:release=60:"
-                    "level=disabled,aresample=48000",
+    at ~14 Mbps) and AAC: `gain_db` make-up gain (float, so it cannot clip), then a peak limiter at `ceiling_db` dBFS
+    (Fairlight's master limiter has no API). The limiter runs at 4x oversampling so it catches inter-sample peaks: at
+    -14 LUFS a 48 kHz limiter still left -0.4 dBTP after the AAC encode. main() lowers the ceiling when the encode
+    still overshoots -1 dBTP. `video=False` encodes the audio alone (fast loudness test passes)."""
+    pic = ["-map", "0:v:0", "-c:v", "libx264", "-crf", str(crf), "-preset", "slow", "-pix_fmt", "yuv420p"] if video \
+        else ["-vn"]
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(master), *pic, "-map", "0:a:0",
+                    "-af", f"volume={gain_db:.2f}dB,aresample=192000,alimiter=limit={10 ** (ceiling_db / 20):.4f}:"
+                    "attack=2:release=60:level=disabled,aresample=48000",
                     "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", str(out)], check=True)
+
+
+def sample_peak(path: Path) -> float:
+    """Highest sample of the file's audio, dBFS (0.0 for a clipped master)."""
+    log = subprocess.run(["ffmpeg", "-nostats", "-i", str(path), "-map", "0:a:0", "-af", "volumedetect", "-f", "null",
+                          "-"], capture_output=True, text=True).stderr
+    return float(re.findall(r"max_volume: (-?[\d.]+) dB", log)[-1])
 
 
 def loudness(path: Path) -> tuple[float, float]:
@@ -617,29 +640,38 @@ def main() -> None:
     archive_previous(root)
     target = film.get("loudness_lufs", -16.0)
     out = root / f"{root.name}.mp4"
-    # Measure the delivered file, not the master: the delivery limiter takes loudness off the peaks, so a single
-    # shift computed on the master lands short. Shift every audio item by the remaining error and re-deliver.
-    total, ceiling = 0.0, -2.0
-    for attempt in range(LOUDNESS_PASSES):
+    # The master must not clip (see the module docstring): keep the timeline's levels, lower them only while the
+    # master clips, then reach the target with the delivery's make-up gain, tested on audio-only encodes.
+    total = 0.0
+    for attempt in range(HEADROOM_RENDERS):
         master = render_master(project, edit_dir, root.name)
-        deliver(master, out, film.get("crf", 16), ceiling, film.get("mono_mix", False))
-        lufs, peak = loudness(out)
-        # AAC overshoots the limiter by more when the mix is dense: lower the ceiling by the excess and re-encode.
-        while peak > -1.0 and ceiling > -6.0:
-            ceiling -= peak + 1.0 + 0.2
-            deliver(master, out, film.get("crf", 16), ceiling, film.get("mono_mix", False))
-            lufs, peak = loudness(out)
-        shift = target - lufs
-        if abs(shift) <= 0.3 or attempt == LOUDNESS_PASSES - 1:
+        head = sample_peak(master)
+        if head < -0.5 or attempt == HEADROOM_RENDERS - 1:
             break
         for item in audio_items(tl):
-            item.SetProperty("AudioVolume", float(item.GetProperty("AudioVolume")) + shift)
+            item.SetProperty("AudioVolume", float(item.GetProperty("AudioVolume")) - 6.0)
         resolve.GetProjectManager().SaveProject()
-        total += shift
+        total -= 6.0
+    test = edit_dir / f"{root.name}_loudness_test.m4a"
+    gain, ceiling = 0.0, -2.0
+    for _ in range(LOUDNESS_PASSES):
+        deliver(master, test, ceiling_db=ceiling, gain_db=gain, video=False)
+        lufs, peak = loudness(test)
+        if peak > -1.0 and ceiling > -6.0:  # AAC overshoots the limiter more on a dense mix: lower the ceiling
+            ceiling = max(-6.0, ceiling - (peak + 1.0 + 0.2))
+            continue
+        if abs(target - lufs) <= 0.3:
+            break
+        gain += target - lufs
+    test.unlink(missing_ok=True)
+    deliver(master, out, film.get("crf", 16), ceiling, gain)
+    lufs, peak = loudness(out)
     warn = "  !! true peak above -1 dBTP" if peak > -1.0 else ""
     warn += f"  !! {lufs:.1f} LUFS, target {target}" if abs(target - lufs) > 0.5 else ""
-    print(f"rendered -> {out}  ({duration(out):.1f}s, {lufs:.1f} LUFS, true peak {peak:.1f} dBTP, "
-          f"gain shift {total:+.1f} dB, limiter {ceiling:.1f} dBFS; master {master.name}){warn}")
+    warn += f"  !! master clips ({head:+.1f} dBFS)" if head >= -0.5 else ""
+    print(f"rendered -> {out}  ({duration(out):.1f}s, {lufs:.1f} LUFS, true peak {peak:.1f} dBTP, master peak "
+          f"{head:.1f} dBFS, item shift {total:+.1f} dB, delivery gain {gain:+.1f} dB, limiter {ceiling:.1f} dBFS; "
+          f"master {master.name}){warn}")
 
 
 if __name__ == "__main__":

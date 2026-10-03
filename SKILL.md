@@ -158,8 +158,8 @@ After 3 unsuccessful re-rolls report the unresolved issue and repair/restage it;
   the first seed. When a line fails the same way on every seed, rewrite or split it instead of re-rolling.
   Multi-line shots need per-line timing edits (key them per line, e.g. `vo_at_<i>`/`vo_tempo_<i>`).
 - **Narration engines are judged by ear, not by SQUIM.** Outcome on Toys Zone ep. 1: the user kept H3 ("so much
-  better than both") with film `"mono_mix": true` (dual-mono delivery; generated speech has a slight stereo spread,
-  L/R correlation ~0.95). The user heard H3 VO as slightly "time-stretched" (it is
+  better than both") with film `"mono_dialogue": true` (on-screen speech folded to mono; narration is already mono;
+  music and songs stay stereo). The user heard H3 VO as slightly "time-stretched" (it is
   in the takes: mono clips, 66/73 at tempo 1). audio.cpp engines (`"narration_engine": "omnivoice"` /
   `"vibevoice7b"`, setting `audiocpp_dir`, aux card, ~4–6 s per take) are cut and gated like H3 takes.
   OmniVoice scored far cleaner (SQUIM PESQ 3.85 vs 2.51, SI-SDR 24 vs 12 dB, sim 0.95 vs 0.94), but across the cut
