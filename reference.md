@@ -144,6 +144,9 @@ Voice-over is generated separately rather than by H3, so the narrator sounds the
     - Fairlight's master limiter has no API.
     - The 21.1 API rejects every `VideoQuality` value, so Resolve's H.264 can't be capped (it comes out at ~14 Mbps).
   - The previous `<film>.mp4` is kept as `_iterN.mp4`. The cut list is exported to `edit/<timeline>.otio`.
+  - Film `"mono_mix": true` delivers dual mono (both channels = (L + R) / 2) through the same limiter and loudness
+    loop; the timeline and master stay stereo. Generated speech carries a slight stereo spread (H3 shot audio:
+    L/R correlation ~0.95, side 15–18 dB under mid) that a listener may hear as a phasey voice.
   - Media is imported from content-addressed copies in `edit/media/`. Resolve doesn't notice a file rewritten in
     place, and `ReplaceClip` on the same path keeps the stale frames.
 - Clips are cached in `<film>/narration/`.

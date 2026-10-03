@@ -55,7 +55,8 @@ under the voice drop to "narration_ducking_db" (-14), and 0 dB audio cross fades
 editable in Resolve. Loudness: render and deliver, measure the delivered file with ffmpeg ebur128, shift every
 audio item by the difference to "loudness_lufs" (-16), repeat (up to LOUDNESS_PASSES) until within 0.3 LU; the
 delivery limiter shaves loudness off the peaks, so one shift measured on the master lands short. A previous
-<film>.mp4 is kept as <film>_iterN.mp4.
+<film>.mp4 is kept as <film>_iterN.mp4. Film "mono_mix": true delivers dual mono (L = R = (L + R) / 2): the timeline and
+master stay stereo; it drops the slight stereo spread of generated speech (H3 shot audio: L/R correlation ~0.95).
 
 Resolve references media by path and does not notice a file rewritten in place, so every clip is imported
 from a content-addressed copy, edit/media/<name>.<sha1[:10]><ext>. A re-rendered shot or re-rolled narration
@@ -555,14 +556,16 @@ def render_master(project, edit_dir: Path, name: str) -> Path:
     return edit_dir / f"{name}_master.mov"
 
 
-def deliver(master: Path, out: Path, crf: int = 16, ceiling_db: float = -2.0) -> None:
+def deliver(master: Path, out: Path, crf: int = 16, ceiling_db: float = -2.0, mono: bool = False) -> None:
     """x264 at `crf` (film "crf", default 16; Resolve's API rejects every VideoQuality value, so its H.264 comes out
     at ~14 Mbps) and AAC through a peak limiter at `ceiling_db` dBFS (Fairlight's master limiter has no API). The
     limiter runs at 4x oversampling so it catches inter-sample peaks: at -14 LUFS a 48 kHz limiter still left
-    -0.4 dBTP after the AAC encode. main() lowers the ceiling when the encode still overshoots -1 dBTP."""
+    -0.4 dBTP after the AAC encode. main() lowers the ceiling when the encode still overshoots -1 dBTP. `mono` folds
+    the mix to identical channels first (film "mono_mix")."""
+    fold = "pan=stereo|c0=0.5*c0+0.5*c1|c1=0.5*c0+0.5*c1," if mono else ""
     subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(master), "-map", "0:v:0", "-map", "0:a:0",
                     "-c:v", "libx264", "-crf", str(crf), "-preset", "slow", "-pix_fmt", "yuv420p",
-                    "-af", f"aresample=192000,alimiter=limit={10 ** (ceiling_db / 20):.4f}:attack=2:release=60:"
+                    "-af", f"{fold}aresample=192000,alimiter=limit={10 ** (ceiling_db / 20):.4f}:attack=2:release=60:"
                     "level=disabled,aresample=48000",
                     "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", str(out)], check=True)
 
@@ -619,12 +622,12 @@ def main() -> None:
     total, ceiling = 0.0, -2.0
     for attempt in range(LOUDNESS_PASSES):
         master = render_master(project, edit_dir, root.name)
-        deliver(master, out, film.get("crf", 16), ceiling)
+        deliver(master, out, film.get("crf", 16), ceiling, film.get("mono_mix", False))
         lufs, peak = loudness(out)
         # AAC overshoots the limiter by more when the mix is dense: lower the ceiling by the excess and re-encode.
         while peak > -1.0 and ceiling > -6.0:
             ceiling -= peak + 1.0 + 0.2
-            deliver(master, out, film.get("crf", 16), ceiling)
+            deliver(master, out, film.get("crf", 16), ceiling, film.get("mono_mix", False))
             lufs, peak = loudness(out)
         shift = target - lufs
         if abs(shift) <= 0.3 or attempt == LOUDNESS_PASSES - 1:
